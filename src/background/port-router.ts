@@ -6,6 +6,7 @@ import {
   type ContentEvent,
   type RoutedContentEvent,
   type SidePanelCommand,
+  type SidePanelEvent,
 } from '../types/protocol';
 
 const SIDE_PANEL_PORT = 'kcode-sidepanel';
@@ -82,6 +83,13 @@ export class PortRouter {
   async fromSidePanel(message: unknown): Promise<void> {
     if (!isSidePanelCommand(message) || !this.sidePanel) return;
     const sidePanel = this.sidePanel;
+    if (message.kind === 'SIDE_PANEL_LIST_CONNECTED_TABS') {
+      const tabs: SidePanelEvent['tabs'] = [...this.contents.entries()]
+        .map(([tabId, port]) => ({ tabId, title: port.sender?.tab?.title ?? 'DeepSeek' }))
+        .sort((left, right) => left.tabId - right.tabId);
+      this.tryPost(sidePanel, { protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: message.requestId, tabs });
+      return;
+    }
     const content = this.contents.get(message.targetTabId);
     if (!content) {
       this.postIdentityLost(sidePanel, message.requestId, message.targetTabId);
@@ -205,7 +213,7 @@ export class PortRouter {
     this.tryPost(sidePanel, event);
   }
 
-  private tryPost(port: chrome.runtime.Port, message: ContentCommand | RoutedContentEvent): boolean {
+  private tryPost(port: chrome.runtime.Port, message: ContentCommand | RoutedContentEvent | SidePanelEvent): boolean {
     try {
       port.postMessage(message);
       return true;

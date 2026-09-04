@@ -27,12 +27,26 @@ export type RiskConsent = {
   grantedAt: number;
 };
 
-export type SidePanelCommand = {
+export type SidePanelPromptCommand = {
   protocolVersion: 1;
   kind: 'CONTENT_SEND_PROMPT';
   requestId: string;
   targetTabId: number;
   prompt: string;
+};
+
+export type SidePanelListTabsCommand = {
+  protocolVersion: 1;
+  kind: 'SIDE_PANEL_LIST_CONNECTED_TABS';
+  requestId: string;
+};
+
+export type SidePanelCommand = SidePanelPromptCommand | SidePanelListTabsCommand;
+export type SidePanelEvent = {
+  protocolVersion: 1;
+  kind: 'SIDE_PANEL_CONNECTED_TABS';
+  requestId: string;
+  tabs: Array<{ tabId: number; title: string }>;
 };
 
 export type ContentCommand = {
@@ -58,6 +72,7 @@ export type VMRequest =
 
 export type VMEvent =
   | { kind: 'VM_READY'; requestId: string }
+  | { kind: 'VM_OUTPUT_DELTA'; requestId: string; delta: string }
   | { kind: 'VM_RESULT'; requestId: string; output: string; exitCode: number }
   | { kind: 'VM_ERROR'; requestId: string; code: string; message: string };
 
@@ -121,12 +136,26 @@ export const isRiskConsent = (value: unknown): value is RiskConsent =>
 
 export const isSidePanelCommand = (value: unknown): value is SidePanelCommand =>
   isRecord(value)
-  && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'targetTabId', 'prompt'])
   && isPortEnvelope(value)
-  && value.kind === 'CONTENT_SEND_PROMPT'
-  && isFiniteInteger(value.targetTabId)
-  && value.targetTabId >= 0
-  && bytesAtMost(value.prompt, MAX_PORT_BYTES);
+  && ((value.kind === 'CONTENT_SEND_PROMPT'
+    && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'targetTabId', 'prompt'])
+    && isFiniteInteger(value.targetTabId)
+    && value.targetTabId >= 0
+    && bytesAtMost(value.prompt, MAX_PORT_BYTES))
+    || (value.kind === 'SIDE_PANEL_LIST_CONNECTED_TABS'
+      && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId'])));
+
+export const isSidePanelEvent = (value: unknown): value is SidePanelEvent =>
+  isRecord(value)
+  && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'tabs'])
+  && isPortEnvelope(value)
+  && value.kind === 'SIDE_PANEL_CONNECTED_TABS'
+  && Array.isArray(value.tabs)
+  && value.tabs.every((tab) => isRecord(tab)
+    && hasExactKeys(tab, ['tabId', 'title'])
+    && isFiniteInteger(tab.tabId)
+    && tab.tabId >= 0
+    && bytesAtMost(tab.title, MAX_PORT_BYTES));
 
 export const isContentCommand = (value: unknown): value is ContentCommand =>
   isRecord(value)
@@ -194,6 +223,8 @@ export const isVMEvent = (value: unknown): value is VMEvent => {
   switch (value.kind) {
     case 'VM_READY':
       return hasExactKeys(value, ['kind', 'requestId']);
+    case 'VM_OUTPUT_DELTA':
+      return hasExactKeys(value, ['kind', 'requestId', 'delta']) && bytesAtMost(value.delta, MAX_DELTA_BYTES);
     case 'VM_RESULT':
       return hasExactKeys(value, ['kind', 'requestId', 'output', 'exitCode'])
         && bytesAtMost(value.output, MAX_PORT_BYTES)
