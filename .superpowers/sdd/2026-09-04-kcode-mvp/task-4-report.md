@@ -42,3 +42,7 @@ The new sanitizer regression was run RED with 8-bit OSC (`\u009d2;title\u0007`),
 ## Fix round 3 — C1 string terminator
 
 New RED tests showed that `\u0090secret\u009cafter` swallowed `after`: C1 ST (`U+009C`) was consumed as payload rather than ending the 8-bit DCS state. The same test exercises a C1 OSC split at the end of one chunk followed by printable output in the next. GREEN treats C1 ST as a string-state terminator alongside BEL and `ESC \\`, restoring the parser to text state for the next chunk.
+
+## Fix round 4 — C1 ST after split ESC
+
+The exact RED sequence `write('\u0090secret\u001b'); write('\u009cafter')` showed that the `string-esc` state still consumed C1 ST and hid `after`. GREEN makes C1 ST terminate from `string-esc` too, retaining the existing `ESC \\` and repeated-ESC handling.

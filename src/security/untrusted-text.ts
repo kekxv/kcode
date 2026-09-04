@@ -67,7 +67,7 @@ export class TerminalChunkSanitizer {
           else if (character === '\u001b') this.state = 'string-esc';
           break;
         case 'string-esc':
-          this.state = character === '\\' ? 'text' : character === '\u001b' ? 'string-esc' : 'string';
+          this.state = character === '\\' || character === '\u009c' ? 'text' : character === '\u001b' ? 'string-esc' : 'string';
           break;
       }
     }

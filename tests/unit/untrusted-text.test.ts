@@ -38,6 +38,13 @@ describe('untrusted text defenses', () => {
     expect(sanitizer.write('\u009dtitle\u009c')).toBe('');
     expect(sanitizer.write('after')).toBe('after');
   });
+
+  it('ends a string when C1 ST follows a split ESC terminator prefix', () => {
+    // Break caught: an ESC at the end of one chunk hides later text when the next chunk starts with C1 ST.
+    const sanitizer = new TerminalChunkSanitizer();
+    expect(sanitizer.write('\u0090secret\u001b')).toBe('');
+    expect(sanitizer.write('\u009cafter')).toBe('after');
+  });
 });
 
 describe('TerminalManager', () => {
