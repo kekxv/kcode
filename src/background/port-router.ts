@@ -107,18 +107,42 @@ export class PortRouter {
       prompt: message.prompt,
     };
     this.pending.set(message.requestId, { sidePanel, content, targetTabId: message.targetTabId });
-    content.postMessage(command);
+    if (!this.tryPost(content, command)) {
+      this.pending.delete(message.requestId);
+      this.postIdentityLost(sidePanel, message.requestId, message.targetTabId);
+    }
   }
 
-  fromContent(port: chrome.runtime.Port, message: unknown): void {
+  async fromContent(port: chrome.runtime.Port, message: unknown): Promise<void> {
     const sourceTabId = port.sender?.tab?.id;
     if (!isTabId(sourceTabId) || this.contents.get(sourceTabId) !== port || !isContentEvent(message)) return;
     const pending = this.pending.get(message.requestId);
     if (!pending || pending.content !== port || pending.targetTabId !== sourceTabId || this.sidePanel !== pending.sidePanel) return;
 
+    let tab: chrome.tabs.Tab;
+    try {
+      tab = await this.dependencies.tabs.get(sourceTabId);
+    } catch {
+      this.failRequest(message.requestId, pending);
+      return;
+    }
+    if (
+      !isDeepSeekTab(tab, sourceTabId)
+      || this.pending.get(message.requestId) !== pending
+      || this.contents.get(sourceTabId) !== port
+      || this.sidePanel !== pending.sidePanel
+    ) {
+      if (this.pending.get(message.requestId) === pending) this.failRequest(message.requestId, pending);
+      return;
+    }
+
     const routed: RoutedContentEvent = { ...message, sourceTabId };
-    pending.sidePanel.postMessage(routed);
-    if (message.kind !== 'CONTENT_RESPONSE_DELTA') this.pending.delete(message.requestId);
+    if (message.kind === 'CONTENT_RESPONSE_DELTA') {
+      if (!this.tryPost(pending.sidePanel, routed)) this.failRequest(message.requestId, pending);
+      return;
+    }
+    this.pending.delete(message.requestId);
+    this.tryPost(pending.sidePanel, routed);
   }
 
   private connect(port: chrome.runtime.Port): void {
@@ -138,7 +162,7 @@ export class PortRouter {
       const tabId = sender.tab?.id;
       if (!isTabId(tabId)) return;
       this.setContentPort(port);
-      port.onMessage.addListener((message) => this.fromContent(port, message));
+      port.onMessage.addListener((message) => void this.fromContent(port, message));
       port.onDisconnect.addListener(() => {
         if (this.contents.get(tabId) === port) {
           this.contents.delete(tabId);
@@ -151,8 +175,7 @@ export class PortRouter {
   private failForSidePanel(sidePanel: chrome.runtime.Port): void {
     for (const [requestId, pending] of this.pending) {
       if (pending.sidePanel === sidePanel) {
-        this.postIdentityLost(sidePanel, requestId, pending.targetTabId);
-        this.pending.delete(requestId);
+        this.failRequest(requestId, pending);
       }
     }
   }
@@ -160,10 +183,14 @@ export class PortRouter {
   private failForContent(content: chrome.runtime.Port): void {
     for (const [requestId, pending] of this.pending) {
       if (pending.content === content) {
-        this.postIdentityLost(pending.sidePanel, requestId, pending.targetTabId);
-        this.pending.delete(requestId);
+        this.failRequest(requestId, pending);
       }
     }
+  }
+
+  private failRequest(requestId: string, pending: PendingRequest): void {
+    if (this.pending.get(requestId) === pending) this.pending.delete(requestId);
+    this.postIdentityLost(pending.sidePanel, requestId, pending.targetTabId);
   }
 
   private postIdentityLost(sidePanel: chrome.runtime.Port, requestId: string, sourceTabId: number): void {
@@ -175,6 +202,15 @@ export class PortRouter {
       message: 'The target tab identity changed before the request could complete.',
       sourceTabId,
     };
-    sidePanel.postMessage(event);
+    this.tryPost(sidePanel, event);
+  }
+
+  private tryPost(port: chrome.runtime.Port, message: ContentCommand | RoutedContentEvent): boolean {
+    try {
+      port.postMessage(message);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

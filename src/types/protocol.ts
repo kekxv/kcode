@@ -168,9 +168,8 @@ export const isRoutedContentEvent = (value: unknown): value is RoutedContentEven
 };
 
 const isDirectoryHandle = (value: unknown): value is FileSystemDirectoryHandle =>
-  typeof value === 'object'
-  && value !== null
-  && (value as { kind?: unknown }).kind === 'directory';
+  typeof FileSystemDirectoryHandle !== 'undefined'
+  && value instanceof FileSystemDirectoryHandle;
 
 export const isVMRequest = (value: unknown): value is VMRequest => {
   if (!isRecord(value) || !isId(value.requestId)) return false;
@@ -186,6 +185,24 @@ export const isVMRequest = (value: unknown): value is VMRequest => {
         && value.timeoutMs > 0;
     case 'VM_CANCEL':
       return hasExactKeys(value, ['kind', 'requestId', 'targetRequestId']) && isId(value.targetRequestId);
+    default:
+      return false;
+  }
+};
+
+export const isVMEvent = (value: unknown): value is VMEvent => {
+  if (!isRecord(value) || !isId(value.requestId)) return false;
+  switch (value.kind) {
+    case 'VM_READY':
+      return hasExactKeys(value, ['kind', 'requestId']);
+    case 'VM_RESULT':
+      return hasExactKeys(value, ['kind', 'requestId', 'output', 'exitCode'])
+        && bytesAtMost(value.output, MAX_PORT_BYTES)
+        && isFiniteInteger(value.exitCode);
+    case 'VM_ERROR':
+      return hasExactKeys(value, ['kind', 'requestId', 'code', 'message'])
+        && isId(value.code)
+        && bytesAtMost(value.message, MAX_PORT_BYTES);
     default:
       return false;
   }
