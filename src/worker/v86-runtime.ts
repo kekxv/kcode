@@ -133,6 +133,30 @@ export class V86Runtime {
     this.serialBytes = [];
     const delta = this.decoder.decode(bytes, { stream: true });
     if (delta.length === 0) return;
+    this.forwardSerialText(delta);
+  }
+
+  /** Splits on Unicode scalar boundaries so each structured-clone payload is bounded by encoded UTF-8 bytes. */
+  private forwardSerialText(text: string): void {
+    let start = 0;
+    let encodedBytes = 0;
+    for (let index = 0; index < text.length;) {
+      const codePoint = text.codePointAt(index);
+      if (codePoint === undefined) break;
+      const scalar = String.fromCodePoint(codePoint);
+      const scalarBytes = new TextEncoder().encode(scalar).byteLength;
+      if (encodedBytes > 0 && encodedBytes + scalarBytes > MAX_SERIAL_DELTA_BYTES) {
+        this.forwardSerialDelta(text.slice(start, index));
+        start = index;
+        encodedBytes = 0;
+      }
+      encodedBytes += scalarBytes;
+      index += scalar.length;
+    }
+    if (start < text.length) this.forwardSerialDelta(text.slice(start));
+  }
+
+  private forwardSerialDelta(delta: string): void {
     if (this.bootReady) {
       this.bootSerialTail = `${this.bootSerialTail}${delta}`.slice(-64);
       this.bootReady.guestReady ||= this.bootSerialTail.includes('KCODE_GUEST_READY');

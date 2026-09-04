@@ -1,8 +1,8 @@
-import { createReadStream, promises as fs } from 'node:fs';
-import { createServer } from 'node:http';
-import { dirname, extname, join } from 'node:path';
+import { promises as fs } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { createServer as createViteServer } from 'vite';
 import { describe, expect, it } from 'vitest';
 import { V86Runtime, VM_MEMORY_BYTES } from '../../src/worker/v86-runtime';
 
@@ -36,6 +36,10 @@ class FakeV86 {
 
   emitSerial(text: string): void {
     for (const byte of new TextEncoder().encode(text)) this.listeners.get('serial0-output-byte')?.(byte);
+  }
+
+  emitBytes(bytes: Uint8Array): void {
+    for (const byte of bytes) this.listeners.get('serial0-output-byte')?.(byte);
   }
 }
 
@@ -95,68 +99,98 @@ describe('V86Runtime', () => {
     expect(FakeV86.latest?.config.initial_state).toEqual({ url: 'chrome-extension://test/v86/alpine-state.bin.zst' });
     expect(output.join('')).toBe('KCODE_GUEST_READY\nKCODE_SMOKE\n');
   });
+
+  it('splits invalid serial bytes by encoded UTF-8 payload size', async () => {
+    // Break caught: a raw 64 KiB batch of invalid bytes expands to 192 KiB of U+FFFD text and must not cross the Worker event limit.
+    const runtime = new V86Runtime({
+      V86: FakeV86 as unknown as typeof import('v86').V86,
+      assetUrl: (name) => `chrome-extension://test/v86/${name}`,
+    });
+    const deltas: string[] = [];
+    runtime.onSerial((delta) => deltas.push(delta));
+    const boot = runtime.boot({ useSnapshot: false });
+    FakeV86.latest?.emit('emulator-loaded');
+    FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n');
+    await boot;
+    deltas.length = 0;
+
+    FakeV86.latest?.emitBytes(new Uint8Array(64 * 1024).fill(0xff));
+    await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
+
+    expect(deltas).toHaveLength(4);
+    expect(deltas.every((delta) => new TextEncoder().encode(delta).byteLength <= 64 * 1024)).toBe(true);
+    expect(deltas.join('')).toBe('\uFFFD'.repeat(64 * 1024));
+  });
 });
 
 const enabled = process.env.KCODE_VM_TEST === '1';
 
 describe.skipIf(!enabled)('packaged VM smoke', () => {
-  it('boots within 30 seconds and returns the serial smoke marker', async () => {
+  it('boots the production Worker and runtime snapshot within 30 seconds and returns the serial smoke marker', async () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
-    const assets = join(root, 'public/v86');
-    const routes = new Map<string, string | null>([
-      ['/smoke.html', null],
-      ['/libv86.mjs', join(root, 'node_modules/v86/build/libv86.mjs')],
-      ...['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs'].map((name): [string, string] => [`/v86/${name}`, join(assets, name)]),
-    ]);
-    for (const path of routes.values()) if (path) await fs.access(path);
-    const server = createServer((request, response) => {
-      const requestPath = request.url?.split('?')[0] ?? '';
-      if (requestPath === '/smoke.html') {
-        response.writeHead(200, { 'Content-Type': 'text/html' }).end('<!doctype html><title>kcode VM smoke</title>');
-        return;
-      }
-      const path = routes.get(requestPath);
-      if (!path) { response.writeHead(404).end(); return; }
-      response.writeHead(200, { 'Content-Type': extname(path) === '.mjs' ? 'text/javascript' : extname(path) === '.wasm' ? 'application/wasm' : 'application/octet-stream' });
-      createReadStream(path).pipe(response);
+    for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']) {
+      await fs.access(join(root, 'public/v86', name));
+    }
+    const vite = await createViteServer({
+      root,
+      configFile: false,
+      optimizeDeps: { exclude: ['v86'] },
+      plugins: [{
+        name: 'kcode-vm-smoke-worker',
+        configureServer(server) {
+          server.middlewares.use('/smoke-worker.mjs', (_request, response) => {
+            response.setHeader('Content-Type', 'text/javascript');
+            response.end("self.chrome = { runtime: { getURL: (path) => new URL(path, self.location.origin + '/').href } }; import '/src/worker/vm.worker.ts';");
+          });
+        },
+      }],
+      server: { host: '127.0.0.1', port: 0 },
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    const address = server.address();
-    if (!address || typeof address === 'string') throw new Error('SMOKE_SERVER_FAILED');
+    await vite.listen();
+    const origin = vite.resolvedUrls?.local[0]?.replace(/\/$/, '');
+    if (!origin) throw new Error('SMOKE_SERVER_FAILED');
     const browser = await chromium.launch();
     try {
       const page = await browser.newPage();
-      const origin = `http://127.0.0.1:${address.port}`;
-      await page.goto(`${origin}/smoke.html`);
-      await expect(page.evaluate(async ({ origin: base, memory }) => {
-        const modulePath = '/libv86.mjs';
-        const { V86 } = await import(modulePath) as typeof import('v86');
-        return new Promise<string>((resolve, reject) => {
-          const config = {
-            wasm_path: `${base}/v86/v86.wasm`, bios: { url: `${base}/v86/seabios.bin` },
-            vga_bios: { url: `${base}/v86/vgabios.bin` }, bzimage: { url: `${base}/v86/vmlinuz-virt` },
-            initrd: { url: `${base}/v86/kcode-initramfs` }, cmdline: 'console=ttyS0',
-            memory_size: memory, autostart: true, filesystem: {},
+      await page.goto(origin);
+      await expect(page.evaluate(async ({ base, memory }) => {
+        (globalThis as unknown as { chrome: unknown }).chrome = {
+          runtime: { getURL: (path: string) => new URL(path, `${base}/`).href },
+        };
+        await new Promise<void>((resolve, reject) => {
+          const worker = new Worker(`${base}/smoke-worker.mjs`, { type: 'module' });
+          const timer = setTimeout(() => reject(new Error('worker VM_READY timeout')), 30_000);
+          worker.onmessage = ({ data }) => {
+            if (data?.kind === 'VM_READY') { clearTimeout(timer); worker.terminate(); resolve(); }
+            if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(data.code)); }
           };
-          if (config.memory_size !== 128 * 1024 * 1024 || 'net_device' in config) reject(new Error('unsafe VM smoke config'));
-          const vm = new V86(config);
+          worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } } });
+        });
+        const modulePath = '/src/worker/v86-runtime.ts';
+        const { V86Runtime } = await import(modulePath) as typeof import('../../src/worker/v86-runtime');
+        const runtime = new V86Runtime();
+        const configMemory = memory;
+        if (configMemory !== 128 * 1024 * 1024) throw new Error('unsafe VM memory');
+        const output: string[] = [];
+        runtime.onSerial((delta) => output.push(delta));
+        await runtime.boot();
+        runtime.serialSend('echo KCODE_SMOKE\n');
+        await new Promise<void>((resolve, reject) => {
           let output = '';
-          let sentSmoke = false;
-          const timer = setTimeout(() => reject(new Error('KCODE_GUEST_READY timeout')), 30_000);
-          vm.add_listener('serial0-output-byte', (byte: number) => {
-            output += String.fromCharCode(byte);
-            if (!sentSmoke && output.includes('KCODE_GUEST_READY')) {
-              sentSmoke = true;
-              vm.serial0_send('echo KCODE_SMOKE\n');
-            }
-            if (output.includes('KCODE_SMOKE')) { clearTimeout(timer); void vm.destroy(); resolve(output); }
+          const timer = setTimeout(() => reject(new Error('KCODE_SMOKE timeout')), 30_000);
+          const stop = runtime.onSerial((delta) => {
+            output += delta;
+            if (output.includes('KCODE_SMOKE')) { clearTimeout(timer); stop(); resolve(); }
             if (output.length > 65_536) output = output.slice(-65_536);
           });
         });
-      }, { origin, memory: VM_MEMORY_BYTES })).resolves.toContain('KCODE_SMOKE');
+        runtime.destroy();
+        if (!output.join('').includes('KCODE_SMOKE')) throw new Error('serial smoke marker missing');
+        return output.join('');
+      }, { base: origin, memory: VM_MEMORY_BYTES })).resolves.toContain('KCODE_SMOKE');
     } finally {
       await browser.close();
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await vite.close();
     }
-  }, 30_000);
+  }, 60_000);
 });

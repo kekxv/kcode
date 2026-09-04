@@ -62,3 +62,24 @@ Repair verification: focused runtime/protocol tests passed (13 passed, 1
 gated skip); full suite, typecheck, and Vite build passed (88 passed, 1 gated
 skip). `assets:verify` remains correctly blocked only by the three absent
 generated guest/snapshot artifacts and their derived manifest digest.
+
+## Re-review repair
+
+- Every snapshot build now captures two independent fresh VMs, resets
+  `Date.now`, `Math.random`, and `performance.now` for each, and rejects any
+  byte difference before writing an output; it no longer relies on a prior
+  output file for the comparison.
+- Worker lifecycle state uses a monotonically increasing generation. Stale
+  boot completions/failures are ignored, while the successful init request ID
+  remains the serial correlation until a later lifecycle transition.
+- Runtime serial output is split by encoded UTF-8 bytes on Unicode scalar
+  boundaries, including the U+FFFD expansion caused by invalid input bytes.
+- The gated smoke now runs a Vite-served production Worker and production
+  `V86Runtime` with the default snapshot URL; it verifies VM readiness and a
+  serial `echo KCODE_SMOKE` round trip against the packaged assets.
+
+Re-review verification: full Vitest suite passed (90 passed, 1 gated skip),
+typecheck and Vite build passed, and JavaScript/shell syntax plus diff checks
+passed. `assets:verify` remains fail-closed for the same absent generated
+kernel/initramfs/snapshot artifacts; the i386 Docker build blocker remains
+unchanged.
