@@ -9,6 +9,21 @@ const frame = (type: number, tag: number, body: Uint8Array<ArrayBufferLike> = ne
 const version = () => frame(MESSAGE.Tversion, 1, new Writer().u32(65_536).string('9P2000.L').finish());
 
 describe('P9Server lifecycle', () => {
+  it('journals a created file and removes it again on explicit rollback', async () => {
+    // Break caught: a 9P create without durable preimage metadata survives rollback and leaves host changes behind.
+    const root = new MemoryFsaRoot();
+    const server = new P9Server(await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read']));
+    server.setTransactionPolicy({ transactionId: 'rollback-1', capabilities: ['read', 'write', 'delete'] });
+    const replies: Uint8Array[] = [];
+    await server.handle(version(), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tattach, 2, new Writer().u32(0).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tlcreate, 3, new Writer().u32(0).string('created.txt').u32(0).u32(0).u32(0).finish()), (reply) => replies.push(reply));
+    expect([replies[2][4], new DataView(replies[2].buffer, replies[2].byteOffset).getUint32(7, true)]).toEqual([MESSAGE.Rlcreate, 0]);
+    expect(await root.getFileHandle('created.txt')).toBeTruthy();
+    await server.rollbackTransaction();
+    await expect(root.getFileHandle('created.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+  });
+
   it('negotiates, attaches a fid, and returns one reply for each accepted request', async () => {
     // Break caught: a missing fid lifecycle reply hangs the guest kernel indefinitely after its first 9P request.
     const root = new MemoryFsaRoot();

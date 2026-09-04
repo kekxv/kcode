@@ -15,4 +15,12 @@ describe('FsaBackend capability confinement', () => {
     await expect(backend.createFile([], 'new.txt')).rejects.toMatchObject({ errno: 13 } satisfies Partial<P9Error>);
     expect(root.resolveCalls.length).toBeGreaterThan(0);
   });
+
+  it('enforces read capability for metadata traversal as well as file bytes', async () => {
+    // Break caught: getattr/walk can expose protected workspace names and sizes even when read is denied.
+    const root = new MemoryFsaRoot();
+    await root.getFileHandle('visible.txt', { create: true });
+    const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, []);
+    await expect(backend.stat(['visible.txt'])).rejects.toMatchObject({ errno: 13 });
+  });
 });

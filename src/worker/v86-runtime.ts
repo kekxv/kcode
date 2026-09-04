@@ -42,6 +42,7 @@ export class V86Runtime {
   private flushQueued = false;
   private destroyed = false;
   private bootSerialTail = '';
+  private bootProbeTimer: ReturnType<typeof setInterval> | null = null;
   private bootReady: { loaded: boolean; guestReady: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(dependencies: V86RuntimeDependencies = {}) {
@@ -78,7 +79,11 @@ export class V86Runtime {
           // A restored snapshot resumes after its original ready marker. This
           // command is consumed only once the serial shell is responsive, so
           // it supplies the same readiness proof for cold and snapshot boots.
-          this.serialSend("printf 'KCODE_GUEST_READY\\n' >/dev/ttyS0\n");
+          this.sendBootProbe();
+          this.bootProbeTimer = setInterval(() => {
+            if (!this.bootReady) { if (this.bootProbeTimer) clearInterval(this.bootProbeTimer); this.bootProbeTimer = null; return; }
+            this.sendBootProbe();
+          }, 1_000);
           this.finishBootIfReady();
         }
       });
@@ -93,7 +98,11 @@ export class V86Runtime {
   async attachWorkspace(handle: FileSystemDirectoryHandle): Promise<void> {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
     await this.p9Server.setRoot(handle, ['read']);
-    this.serialSend('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work\n');
+    const nonce = crypto.randomUUID();
+    const marker = `KCODE_MOUNT_${nonce}`;
+    const mounted = this.waitForSerialMarker(marker);
+    this.serialSend(`mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work; rc=$?; printf '${marker}:%s\\n' "$rc" >/dev/ttyS0\n`);
+    await mounted;
   }
 
   serialSend(data: string): void {
@@ -168,7 +177,9 @@ export class V86Runtime {
   private forwardSerialDelta(delta: string): void {
     if (this.bootReady) {
       this.bootSerialTail = `${this.bootSerialTail}${delta}`.slice(-64);
-      this.bootReady.guestReady ||= this.bootSerialTail.includes('KCODE_GUEST_READY');
+      // The serial terminal echoes our `printf` command; accept only a real
+      // marker line, never the marker text inside that echoed command.
+      this.bootReady.guestReady ||= /(?:^|\r?\n)KCODE_GUEST_READY\r?\n/.test(this.bootSerialTail);
       this.finishBootIfReady();
     }
     for (const listener of this.serialListeners) listener(delta);
@@ -182,10 +193,27 @@ export class V86Runtime {
     });
   }
 
+  /** Mount readiness is a nonce-framed shell result, never inferred from serial timing. */
+  private waitForSerialMarker(marker: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { stop(); reject(new Error('VM_WORKSPACE_MOUNT_TIMEOUT')); }, VM_BOOT_TIMEOUT_MS);
+      let buffer = '';
+      const stop = this.onSerial((delta) => {
+        buffer = `${buffer}${delta}`.slice(-256);
+        const match = buffer.match(new RegExp(`${marker}:(\\d+)`));
+        if (!match) return;
+        stop(); clearTimeout(timeout);
+        if (match[1] === '0') resolve(); else reject(new Error('VM_WORKSPACE_MOUNT_FAILED'));
+      });
+    });
+  }
+
   private finishBootIfReady(): void {
     const ready = this.bootReady;
     if (!ready || !ready.loaded || !ready.guestReady) return;
     clearTimeout(ready.timer);
+    if (this.bootProbeTimer) clearInterval(this.bootProbeTimer);
+    this.bootProbeTimer = null;
     this.bootReady = null;
     ready.resolve();
   }
@@ -194,7 +222,13 @@ export class V86Runtime {
     const ready = this.bootReady;
     if (!ready) return;
     clearTimeout(ready.timer);
+    if (this.bootProbeTimer) clearInterval(this.bootProbeTimer);
+    this.bootProbeTimer = null;
     this.bootReady = null;
     ready.reject(error);
+  }
+
+  private sendBootProbe(): void {
+    this.serialSend("printf 'KCODE_GUEST_READY\\n' >/dev/ttyS0\n");
   }
 }

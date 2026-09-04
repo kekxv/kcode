@@ -37,6 +37,7 @@ const checkSegments = (segments: readonly string[]): void => {
 
 export type FsaEntry = { name: string; kind: FileSystemHandleKind; handle: FileSystemHandle };
 export type FsaStat = { kind: FileSystemHandleKind; size: number; lastModified: number };
+export type FsaSnapshot = { exists: boolean; kind?: FileSystemHandleKind; bytes?: Uint8Array; lastModified?: number; size?: number };
 export type FsaBackendPolicy = readonly WorkspaceCapability[];
 
 /** FSA-only workspace boundary. It never accepts or constructs host path strings. */
@@ -74,7 +75,7 @@ export class FsaBackend {
   }
 
   async stat(segments: readonly string[]): Promise<FsaStat> {
-    checkSegments(segments); const handle = await this.handle(segments); if (handle.kind === 'directory') return { kind: 'directory', size: 0, lastModified: 0 };
+    this.require('read'); checkSegments(segments); const handle = await this.handle(segments); if (handle.kind === 'directory') return { kind: 'directory', size: 0, lastModified: 0 };
     try { const file = await deadline((handle as FileSystemFileHandle).getFile()); return { kind: 'file', size: file.size, lastModified: file.lastModified }; } catch (error) { return mapDomException(error); }
   }
 
@@ -103,6 +104,23 @@ export class FsaBackend {
       let source: FileSystemFileHandle; try { source = await deadline(sourceDirectory.getFileHandle(sourceName)); } catch (error) { return mapDomException(error); }
       try { await deadline(destinationDirectory.getFileHandle(destinationName)); return p9(ERRNO.EEXIST, 'Destination already exists.'); } catch (error) { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') return mapDomException(error); }
       try { const original = await deadline(source.getFile()); if (original.size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'File exceeds mutation limit.'); const bytes = new Uint8Array(await original.arrayBuffer()); const temporaryName = `.${destinationName}.kcode-tmp-${crypto.randomUUID()}`; const temporary = await deadline(destinationDirectory.getFileHandle(temporaryName, { create: true })); const writable = await deadline(temporary.createWritable()); await deadline(writable.write(bytes as unknown as FileSystemWriteChunkType)); await deadline(writable.close()); const verified = await deadline(temporary.getFile()); if (verified.size !== original.size) p9(ERRNO.EIO, 'Rename copy verification failed.'); await deadline(destinationDirectory.removeEntry(temporaryName)); const output = await deadline(destinationDirectory.getFileHandle(destinationName, { create: true })); const outputWritable = await deadline(output.createWritable()); await deadline(outputWritable.write(bytes as unknown as FileSystemWriteChunkType)); await deadline(outputWritable.close()); await deadline(sourceDirectory.removeEntry(sourceName)); } catch (error) { return mapDomException(error); }
+    });
+  }
+
+  /** Captures a confined preimage for the journal without granting guest read authority. */
+  async snapshot(segments: readonly string[]): Promise<FsaSnapshot> {
+    checkSegments(segments);
+    try { const handle = await this.handle(segments); if (handle.kind === 'directory') return { exists: true, kind: 'directory', size: 0 }; const file = await deadline((handle as FileSystemFileHandle).getFile()); if (file.size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'Journal preimage exceeds file limit.'); return { exists: true, kind: 'file', bytes: new Uint8Array(await deadline(file.arrayBuffer())), lastModified: file.lastModified, size: file.size }; } catch (error) { if (error instanceof P9Error && error.errno === ERRNO.ENOENT) return { exists: false }; throw error; }
+  }
+
+  /** Restores a preimage during rollback/recovery; this never constructs a host path. */
+  async restore(segments: readonly string[], snapshot: FsaSnapshot): Promise<void> {
+    checkSegments(segments); const parent = segments.slice(0, -1); const name = segments.at(-1); if (!name) return;
+    await this.withLocks([segments, parent], async () => {
+      const directory = await this.directory(parent);
+      if (!snapshot.exists) { try { await deadline(directory.removeEntry(name, { recursive: true })); } catch (error) { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') mapDomException(error); } return; }
+      if (snapshot.kind === 'directory') { try { await deadline(directory.getDirectoryHandle(name, { create: true })); } catch (error) { mapDomException(error); } return; }
+      try { const file = await deadline(directory.getFileHandle(name, { create: true })); const writable = await deadline(file.createWritable()); await deadline(writable.write((snapshot.bytes ?? new Uint8Array()) as unknown as FileSystemWriteChunkType)); await deadline(writable.close()); } catch (error) { mapDomException(error); }
     });
   }
 

@@ -60,9 +60,15 @@ describe('V86Runtime', () => {
     const boot = runtime.boot({ useSnapshot: false });
     FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n'); await boot;
     const root = { kind: 'directory', resolve: async (handle: unknown) => handle === root ? [] : null } as unknown as FileSystemDirectoryHandle;
-    await runtime.attachWorkspace(root);
+    let attached = false;
+    const attach = runtime.attachWorkspace(root).then(() => { attached = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(FakeV86.latest?.config.filesystem).toMatchObject({ handle9p: expect.any(Function) });
-    expect(FakeV86.latest?.sent).toContain('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work\n');
+    expect(FakeV86.latest?.sent.join('')).toContain('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work');
+    expect(attached).toBe(false);
+    const marker = FakeV86.latest?.sent.join('').match(/KCODE_MOUNT_[A-Za-z0-9-]+/)?.[0];
+    if (!marker) throw new Error('mount marker missing');
+    FakeV86.latest?.emitSerial(`${marker}:0\n`); await attach;
     expect(FakeV86.latest?.sent.join('')).not.toContain('/workspace');
   });
 
@@ -294,7 +300,7 @@ describe('two-stage Alpine boot assets', () => {
 const enabled = process.env.KCODE_VM_TEST === '1';
 
 describe.skipIf(!enabled)('packaged VM smoke', () => {
-  it('boots the production Worker and runtime snapshot within 30 seconds and returns the serial smoke marker', async () => {
+  it('mounts a real FSA directory only at /work and enforces read-only/protected-path boundaries', async () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
     for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']) {
       await fs.access(join(root, 'public/v86', name));
@@ -313,27 +319,44 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
       if (!extensionOrigin) throw new Error('PACKAGED_VM_EXTENSION_ORIGIN_MISSING');
       const page = await browser.newPage();
       await page.goto(`${extensionOrigin}/src/sidepanel/index.html`);
-      await expect(page.evaluate(async ({ workerFile, memory }) => {
+      await expect(page.evaluate(async ({ workerFile }) => {
         return new Promise<string>((resolve, reject) => {
           const worker = new Worker(chrome.runtime.getURL(`assets/${workerFile}`), { type: 'module' });
-          const timer = setTimeout(() => reject(new Error('worker VM_READY timeout')), 30_000);
-          let ready = false;
+          let phase: 'boot' | 'attach' | 'exec' = 'boot';
+          let output = '';
+          const events: unknown[] = [];
+          const timer = setTimeout(() => reject(new Error(`worker workspace timeout:${JSON.stringify(events)}`)), 20_000);
           worker.onmessage = ({ data }) => {
-            if (data?.kind === 'VM_READY' && !ready) {
-              ready = true;
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-smoke', command: 'echo KCODE_SMOKE', timeoutMs: 30_000 });
+            events.push(data);
+            if (data?.kind === 'VM_READY' && phase === 'boot') {
+              phase = 'attach';
+              void (async () => {
+                const directory = await navigator.storage.getDirectory();
+                for (const [name, contents] of [['visible.txt', 'host-visible'], ['.env', 'host-secret']] as const) {
+                  const file = await directory.getFileHandle(name, { create: true });
+                  const writable = await file.createWritable(); await writable.write(contents); await writable.close();
+                }
+                worker.postMessage({ kind: 'VM_ATTACH_WORKSPACE', requestId: 'worker-attach', handle: directory });
+              })().catch(reject);
               return;
             }
-            if (ready && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-smoke' && data.delta.includes('KCODE_SMOKE')) {
+            if (data?.kind === 'VM_READY' && phase === 'attach') {
+              phase = 'exec';
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-smoke', command: "pwd; cat visible.txt; find . -maxdepth 1 -type f -print; : > denied.txt; printf 'KCODE_RESULT:write=%s\\n' \"$?\"", timeoutMs: 30_000 });
+              return;
+            }
+            if (phase === 'exec' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-smoke') {
+              output += data.delta;
+              if (!output.includes('KCODE_RESULT:')) return;
               clearTimeout(timer);
               worker.terminate();
-              resolve(data.delta);
+              resolve(output);
             }
-            if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(data.code)); }
+            if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(`${data.code}:${JSON.stringify(events)}`)); }
           };
           worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } } });
         });
-      }, { workerFile, memory: VM_MEMORY_BYTES })).resolves.toContain('KCODE_SMOKE');
+      }, { workerFile })).resolves.toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_RESULT:write=[1-9]/));
     } finally {
       await browser.close();
       await fs.rm(userDataDirectory, { recursive: true, force: true });

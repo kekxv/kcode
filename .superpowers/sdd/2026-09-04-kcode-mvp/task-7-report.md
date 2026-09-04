@@ -27,11 +27,11 @@ Focused tests verify backend `resolve` confinement/read-only denial, encrypted r
 
 ## Real guest-mount result
 
-The required real guest integration did **not** complete in this environment, so no mount result is claimed for `pwd`, `cat`, `find`, read-only refusal, approved write, rollback, or protected-path denial.
+The required real guest integration is still incomplete, so no success is claimed for `pwd`, `cat`, `find`, read-only refusal, approved write, rollback, or protected-path denial.
 
-Exact blocker: `KCODE_VM_TEST=1 npm run test:run -- tests/integration/vm-smoke.test.ts` launches Chromium with `headless: false`; this container has no X server (`Missing X server or $DISPLAY`). `xvfb-run` is installed but cannot start because `xauth` is absent (`xvfb-run: error: xauth command not found`). The existing smoke test also only boots and runs `echo KCODE_SMOKE`; it does not provision a selected FSA directory for the mandated mount assertions.
+`DISPLAY=:99 KCODE_VM_TEST=1 npm run test:run -- tests/integration/vm-smoke.test.ts` now launches the packaged extension and provisions a real OPFS `FileSystemDirectoryHandle` for attachment. The VM reaches OpenRC startup, but it has not reached the nonce-confirmed serial readiness/mount result before the real-test deadline. The test captures repeated echoed probe commands and OpenRC startup/mount output, but no `KCODE_GUEST_READY` marker line. Therefore no `/work` assertions were fabricated.
 
-The integration must be run in a Chrome/Xvfb environment with `xauth` installed (or equivalent display support) and extended to provision a directory handle before claiming those real mount behaviors.
+The server now journals every mutation before the FSA operation and exposes commit/rollback/recover methods. The currently defined VM message protocol has no authenticated transaction-escalation/commit/rollback request; adding that end-to-end approval lifecycle requires the Task 10 authority owner rather than accepting an untrusted worker message.
 
 ## Journal storage note
 

@@ -27,6 +27,23 @@ export class MemoryJournalStorage implements JournalStorage {
   bytes(): Uint8Array[] { return [...this.values.values()].map((value) => new Uint8Array(value)); }
 }
 
+/** OPFS transaction directory; records are encrypted before reaching this store. */
+export class OpfsJournalStorage implements JournalStorage {
+  private constructor(private readonly directory: FileSystemDirectoryHandle) {}
+  static async open(transactionId: string): Promise<OpfsJournalStorage> {
+    const storage = (navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> }).getDirectory;
+    if (!storage) throw new Error('JOURNAL_STORAGE_UNAVAILABLE');
+    const root = await storage.call(navigator.storage);
+    const journal = await root.getDirectoryHandle('kcode-journal', { create: true });
+    return new OpfsJournalStorage(await journal.getDirectoryHandle(transactionId, { create: true }));
+  }
+  async put(name: string, bytes: Uint8Array): Promise<void> { const file = await this.directory.getFileHandle(name, { create: true }); const writable = await file.createWritable(); await writable.write(bytes as unknown as FileSystemWriteChunkType); await writable.close(); }
+  async get(name: string): Promise<Uint8Array | null> { try { const file = await this.directory.getFileHandle(name); return new Uint8Array(await (await file.getFile()).arrayBuffer()); } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return null; throw error; } }
+  async remove(name: string): Promise<void> { await this.directory.removeEntry(name); }
+  async list(): Promise<string[]> { const values: string[] = []; for await (const [name] of (this.directory as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) values.push(name); return values; }
+  async clear(): Promise<void> { for (const name of await this.list()) await this.directory.removeEntry(name, { recursive: true }); }
+}
+
 /** Encrypted, bounded rollback journal. OPFS adapters supply the durable storage in production. */
 export class MutationJournal {
   private readonly entries: JournalEntrySummary[] = [];
