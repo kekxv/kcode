@@ -66,7 +66,7 @@ describe('V86Runtime', () => {
     FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`); await boot;
     const root = { kind: 'directory', resolve: async (handle: unknown) => handle === root ? [] : null } as unknown as FileSystemDirectoryHandle;
     let attached = false;
-    const attach = runtime.attachWorkspace(root).then(() => { attached = true; });
+    const attach = runtime.attachWorkspace(root, 'workspace-1').then(() => { attached = true; });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(FakeV86.latest?.config.filesystem).toMatchObject({ handle9p: expect.any(Function) });
     expect(FakeV86.latest?.sent.join('')).toContain('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work');
@@ -412,7 +412,7 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
             }
             if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(`${data.code}:${JSON.stringify(events)}`)); }
           };
-          worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } });
+          worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } });
         });
       }, { workerFile }).catch((error) => { throw new Error(`${String(error)}; runtime logs: ${runtimeLogs.join(' | ')}`); });
       expect(workspaceOutput).toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_READONLY_DONE:[1-9][\s\S]*KCODE_PROTECTED_DONE:[1-9][\s\S]*KCODE_WRITE_DONE:0/));

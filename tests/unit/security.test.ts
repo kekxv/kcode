@@ -7,25 +7,25 @@ import { normalizeWorkspacePath } from '../../src/utils/path';
 describe('workspace session parsing', () => {
   it('accepts a workspace with WISP and rejects malformed network state', () => {
     const session = parseSession({
-      mode: 'workspace', capabilities: ['read'],
+      mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'],
       network: { mode: 'wisp', relayUrl: 'wss://relay.test.invalid/wisp' },
     });
 
     expect(session.network.mode).toBe('wisp');
     expect(canUseNetwork(session)).toBe(true);
     expect(() => parseSession({
-      mode: 'workspace', capabilities: ['read'],
+      mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'],
       network: { mode: 'offline', relayUrl: 'wss://relay.test.invalid/wisp' },
     })).toThrow('INVALID_SESSION');
     expect(() => parseSession({
-      mode: 'workspace', capabilities: ['read'],
+      mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'],
       network: { mode: 'wisp', relayUrl: 'ws://relay.test.invalid/wisp' },
     })).toThrow('INVALID_RELAY_URL');
   });
 
   it.each([
-    { mode: 'workspace', capabilities: ['read', 'read'], network: { mode: 'offline' } },
-    { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' }, unexpected: true },
+    { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'read'], network: { mode: 'offline' } },
+    { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' }, unexpected: true },
   ])('rejects ambiguous or malformed session state', (session) => {
     expect(() => parseSession(session)).toThrow('INVALID_SESSION');
   });
@@ -35,13 +35,13 @@ describe('workspace session parsing', () => {
     'wss://relay.test.invalid/wisp#fragment',
   ])('rejects a relay URL with credentials or fragments: %s', (relayUrl) => {
     expect(() => parseSession({
-      mode: 'workspace', capabilities: ['read'], network: { mode: 'wisp', relayUrl },
+      mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'wisp', relayUrl },
     })).toThrow('INVALID_RELAY_URL');
   });
 
   it('copies and freezes capabilities so later input mutation cannot escalate access', () => {
     const capabilities = ['read'];
-    const session = parseSession({ mode: 'workspace', capabilities, network: { mode: 'offline' } });
+    const session = parseSession({ mode: 'workspace', workspaceId: 'workspace-1', capabilities, network: { mode: 'offline' } });
 
     capabilities.push('write');
 

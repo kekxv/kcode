@@ -6,7 +6,7 @@ import { MemoryJournalStorage, MutationJournal, OpfsJournalStorage, type Journal
 import type { P9Request, P9Response, Qid } from './types';
 
 export type TransactionPolicy = { transactionId: string; capabilities: readonly WorkspaceCapability[] };
-type JournalFactory = (transactionId: string) => Promise<JournalStorage>;
+type JournalFactory = (workspaceBinding: string, transactionId: string) => Promise<JournalStorage>;
 const MAX_FIDS = 4_096; const MAX_IN_FLIGHT = 64; const MAX_QIDS = 100_000; const MAX_QUEUED_MUTATION_BYTES = 16 * 1024 * 1024;
 type Fid = { pathSegments: string[]; openMode: number | null };
 const qidType = (kind: FileSystemHandleKind): number => kind === 'directory' ? 0x80 : 0;
@@ -23,15 +23,18 @@ export class P9Server {
   private transaction: TransactionPolicy | null = null;
   private journal: MutationJournal | null = null;
   private journalTransactionId: string | null = null;
+  private journalInitialization: Promise<MutationJournal> | null = null;
+  private workspaceBinding = 'default';
+  private mutationMutex: Promise<void> = Promise.resolve();
   private readonly activeMutations = new Set<number>();
   private mutationPoisoned = false;
   private transactionFinalizing = false;
   private readonly mutationIdleWaiters = new Set<() => void>();
-  constructor(backend?: FsaBackend, private readonly journalFactory: JournalFactory = async (transactionId) => {
-    if (typeof navigator !== 'undefined' && typeof navigator.storage !== 'undefined') return OpfsJournalStorage.open(transactionId);
+  constructor(backend?: FsaBackend, private readonly journalFactory: JournalFactory = async (workspaceBinding, transactionId) => {
+    if (typeof navigator !== 'undefined' && typeof navigator.storage !== 'undefined') return OpfsJournalStorage.open(workspaceBinding, transactionId);
     return new MemoryJournalStorage();
   }) { this.backend = backend ?? null; }
-  async setRoot(root: FileSystemDirectoryHandle, policy: readonly WorkspaceCapability[] = ['read']): Promise<void> { const backend = await FsaBackend.attach(root, policy); await this.recoverDurableJournals(backend); this.backend = backend; this.fids.clear(); this.qids.clear(); this.transaction = null; this.journal = null; this.journalTransactionId = null; this.mutationPoisoned = false; this.transactionFinalizing = false; }
+  async setRoot(root: FileSystemDirectoryHandle, policy: readonly WorkspaceCapability[] = ['read'], workspaceBinding = 'default'): Promise<void> { if (!/^[A-Za-z0-9_-]{1,64}$/.test(workspaceBinding)) throw new P9Error(ERRNO.EACCES, 'Invalid workspace binding.'); const backend = await FsaBackend.attach(root, policy); await this.recoverDurableJournals(backend, workspaceBinding); this.backend = backend; this.workspaceBinding = workspaceBinding; this.fids.clear(); this.qids.clear(); this.transaction = null; this.journal = null; this.journalTransactionId = null; this.journalInitialization = null; this.mutationPoisoned = false; this.transactionFinalizing = false; }
   setTransactionPolicy(policy: TransactionPolicy | null): void {
     if (this.transactionFinalizing) throw new P9Error(ERRNO.EBUSY, 'Transaction finalization is in progress.');
     if (policy && this.transaction && this.transaction.transactionId !== policy.transactionId && (this.activeMutations.size || this.journal?.summary().state !== 'clean')) throw new P9Error(ERRNO.EBUSY, 'Existing transaction requires finalization.');
@@ -105,15 +108,18 @@ export class P9Server {
     this.reserveMutation(queuedBytes);
     this.activeMutations.add(tag);
     try {
-      const journal = await this.ensureJournal();
-      const backend = this.needBackend();
-      for (const entry of entries) {
-        const original = entry.original ?? await backend.snapshot(entry.path);
-        await journal.record({ path: entry.path.join('/'), operation, original, resultingBytes: entry.resultingBytes });
-      }
-      const result = await apply();
-      for (const entry of entries) await journal.setExpected(entry.path.join('/'), await backend.snapshot(entry.path));
-      return result;
+      return await this.serializeMutation(async () => {
+        if (this.transactionFinalizing || this.mutationPoisoned || this.journal?.summary().state === 'needs-rollback') throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.');
+        const journal = await this.ensureJournal();
+        const backend = this.needBackend();
+        for (const entry of entries) {
+          const original = entry.original ?? await backend.snapshot(entry.path);
+          await journal.record({ path: entry.path.join('/'), operation, original, resultingBytes: entry.resultingBytes });
+        }
+        const result = await apply();
+        for (const entry of entries) await journal.setExpected(entry.path.join('/'), await backend.snapshot(entry.path));
+        return result;
+      });
     } catch (error) {
       if (this.mutationPoisoned || (error instanceof P9Error && error.errno === ERRNO.ETIMEDOUT)) {
         this.mutationPoisoned = true;
@@ -126,20 +132,36 @@ export class P9Server {
     const transaction = this.transaction;
     if (!transaction) throw new P9Error(ERRNO.EACCES, 'Mutations require an approved transaction.');
     if (this.journal && this.journalTransactionId === transaction.transactionId) return this.journal;
-    const storage = await this.journalFactory(transaction.transactionId);
-    const key = typeof navigator === 'undefined' || typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory !== 'function'
-      ? crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
-      : undefined;
-    this.journal = key ? await MutationJournal.begin(transaction.transactionId, storage, key) : await MutationJournal.begin(transaction.transactionId, storage);
-    this.journalTransactionId = transaction.transactionId;
-    return this.journal;
+    if (this.journalInitialization) return this.journalInitialization;
+    const pending = (async () => {
+      const storage = await this.journalFactory(this.workspaceBinding, transaction.transactionId);
+      const key = typeof navigator === 'undefined' || typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory !== 'function'
+        ? crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+        : undefined;
+      const journal = key ? await MutationJournal.begin(transaction.transactionId, storage, key) : await MutationJournal.begin(transaction.transactionId, storage);
+      this.journal = journal; this.journalTransactionId = transaction.transactionId;
+      return journal;
+    })();
+    this.journalInitialization = pending;
+    try { return await pending; } finally { if (this.journalInitialization === pending) this.journalInitialization = null; }
   }
-  private async recoverDurableJournals(backend: FsaBackend): Promise<void> {
+  private async recoverDurableJournals(backend: FsaBackend, workspaceBinding: string): Promise<void> {
     if (typeof navigator === 'undefined' || typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory !== 'function') return;
-    for (const transactionId of await OpfsJournalStorage.transactionIds()) {
-      const journal = await MutationJournal.openExisting(transactionId, await OpfsJournalStorage.openExisting(transactionId));
-      await journal.rollback(async (path, expected) => backend.matchesSnapshot(path.split('/'), expected), async (path, original) => backend.restore(path.split('/'), original));
+    for (const transactionId of await OpfsJournalStorage.transactionIds(workspaceBinding)) {
+      const journal = await MutationJournal.openExisting(transactionId, await OpfsJournalStorage.openExisting(workspaceBinding, transactionId));
+      await journal.recoverConservatively(
+        async (path, original) => backend.matchesSnapshot(path.split('/'), original),
+        async (path, original) => backend.restore(path.split('/'), original),
+        async (path, expected) => backend.matchesSnapshot(path.split('/'), expected),
+      );
     }
+  }
+  private async serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationMutex;
+    let release!: () => void;
+    this.mutationMutex = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
   private async waitForMutations(): Promise<void> { if (!this.activeMutations.size) return; await new Promise<void>((resolve) => this.mutationIdleWaiters.add(resolve)); }
   private async readdir(path: readonly string[], offset: number, count: number): Promise<Uint8Array> { const entries = await this.needBackend().list(path); const writer = new Writer(count); for (let index = offset; index < entries.length; index += 1) { const entry = entries[index]; const item = new Writer(count).qid(await this.qid([...path, entry.name], entry.kind)).u64(BigInt(index + 1)).u8(qidType(entry.kind)).string(entry.name).finish(); if (writer.finish().byteLength + item.byteLength > count) break; writer.bytes(item); } return writer.finish(); }

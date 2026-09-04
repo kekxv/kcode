@@ -13,6 +13,8 @@ export type NetworkMode =
 
 export type WorkspaceSession = {
   mode: 'workspace';
+  /** Stable authenticated selection identity; never accepted on an attach or transaction request. */
+  workspaceId: string;
   capabilities: readonly WorkspaceCapability[];
   network: NetworkMode;
 };

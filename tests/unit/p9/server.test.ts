@@ -4,7 +4,7 @@ import { P9CodecSession, Reader, Writer } from '../../../src/worker/p9/codec';
 import { ERRNO, MESSAGE } from '../../../src/worker/p9/constants';
 import { FsaBackend, P9Error } from '../../../src/worker/p9/fsa-backend';
 import { P9Server } from '../../../src/worker/p9/server';
-import { MutationJournal, OpfsJournalStorage } from '../../../src/worker/p9/mutation-journal';
+import { MemoryJournalStorage, MutationJournal, OpfsJournalStorage } from '../../../src/worker/p9/mutation-journal';
 import { MemoryFsaRoot } from '../../helpers/memory-fsa';
 
 const frame = (type: number, tag: number, body: Uint8Array<ArrayBufferLike> = new Uint8Array()): Uint8Array => new Writer().u32(7 + body.byteLength).u8(type).u16(tag).bytes(body).finish();
@@ -25,6 +25,27 @@ describe('P9Server lifecycle', () => {
     expect(() => server.setTransactionPolicy({ transactionId: 'replacement', capabilities: ['read', 'write', 'delete'] })).toThrow('Existing transaction requires finalization');
     await server.rollbackTransaction();
     await expect(root.getFileHandle('created.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+  });
+
+  it('serializes concurrent first mutations so rollback retains every durable preimage', async () => {
+    // Break caught: two mutations that both initialize a journal can each write entry-1, leaving one host mutation untracked.
+    const root = new MemoryFsaRoot();
+    const storage = new MemoryJournalStorage();
+    const server = new P9Server(await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write', 'delete']), async () => storage);
+    server.setTransactionPolicy({ transactionId: 'concurrent-server', capabilities: ['read', 'write', 'delete'] });
+    const replies: Uint8Array[] = [];
+    await server.handle(version(), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tattach, 2, new Writer().u32(0).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tattach, 3, new Writer().u32(1).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+
+    await Promise.all([
+      server.handle(frame(MESSAGE.Tlcreate, 4, new Writer().u32(0).string('one.txt').u32(0).u32(0).u32(0).finish()), (reply) => replies.push(reply)),
+      server.handle(frame(MESSAGE.Tlcreate, 5, new Writer().u32(1).string('two.txt').u32(0).u32(0).u32(0).finish()), (reply) => replies.push(reply)),
+    ]);
+    await server.rollbackTransaction();
+
+    await expect(root.getFileHandle('one.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+    await expect(root.getFileHandle('two.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
   });
 
   it('negotiates, attaches a fid, and returns one reply for each accepted request', async () => {
@@ -78,6 +99,22 @@ describe('P9Server lifecycle', () => {
     await expect((await root.getDirectoryHandle('nonempty')).getFileHandle('child.txt')).resolves.toBeTruthy();
   });
 
+  it('preserves an external child added to a guest-created directory before rollback', async () => {
+    // Break caught: a directory's empty expected state cannot authorize recursively deleting a host child added after the guest mkdir.
+    const root = new MemoryFsaRoot();
+    const server = new P9Server(await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write', 'delete']));
+    server.setTransactionPolicy({ transactionId: 'directory-drift', capabilities: ['read', 'write', 'delete'] });
+    const replies: Uint8Array[] = [];
+    await server.handle(version(), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tattach, 2, new Writer().u32(0).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tmkdir, 3, new Writer().u32(0).string('guest-dir').u32(0o755).u32(0).finish()), (reply) => replies.push(reply));
+    const directory = await root.getDirectoryHandle('guest-dir');
+    await directory.getFileHandle('external.txt', { create: true });
+
+    await expect(server.rollbackTransaction()).rejects.toThrow('WORKSPACE_CONFLICT');
+    await expect((await root.getDirectoryHandle('guest-dir')).getFileHandle('external.txt')).resolves.toBeTruthy();
+  });
+
   it('returns WORKSPACE_CONFLICT rather than overwriting a host edit made after guest mutation', async () => {
     // Break caught: rollback must never replace a newer host file merely because the guest has a journal preimage.
     const root = new MemoryFsaRoot();
@@ -106,12 +143,38 @@ describe('P9Server lifecycle', () => {
       const file = await root.getFileHandle('recover.txt', { create: true });
       const writable = await file.createWritable(); await writable.write(new TextEncoder().encode('guest')); await writable.close();
       const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write', 'delete']);
-      const journal = await MutationJournal.begin('crash_recover', await OpfsJournalStorage.open('crash_recover'));
+      const journal = await MutationJournal.begin('crash_recover', await OpfsJournalStorage.open('default', 'crash_recover'));
       await journal.record({ path: 'recover.txt', operation: 'create', original: { exists: false }, resultingBytes: 5 });
       await journal.setExpected('recover.txt', await backend.snapshot(['recover.txt']));
 
       await new P9Server().setRoot(root as unknown as FileSystemDirectoryHandle);
       await expect(root.getFileHandle('recover.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('recovers a durable journal only when the authenticated workspace binding matches', async () => {
+    // Break caught: origin-wide journal enumeration can roll a prior workspace's mutation back into a newly selected directory.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspaceA = new MemoryFsaRoot();
+    const workspaceB = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', indexedDB);
+    try {
+      const file = await workspaceA.getFileHandle('recover.txt', { create: true });
+      const writable = await file.createWritable(); await writable.write(new TextEncoder().encode('guest')); await writable.close();
+      const backend = await FsaBackend.attach(workspaceA as unknown as FileSystemDirectoryHandle, ['read', 'write', 'delete']);
+      const journal = await MutationJournal.begin('binding-recover', await OpfsJournalStorage.open('workspace-A', 'binding-recover'));
+      await journal.record({ path: 'recover.txt', operation: 'create', original: { exists: false }, resultingBytes: 5 });
+      await journal.setExpected('recover.txt', await backend.snapshot(['recover.txt']));
+
+      await expect(new P9Server().setRoot(workspaceB as unknown as FileSystemDirectoryHandle, ['read'], 'workspace-B')).resolves.toBeUndefined();
+      await expect(workspaceB.getFileHandle('recover.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+      await expect(workspaceA.getFileHandle('recover.txt')).resolves.toBeTruthy();
+
+      await new P9Server().setRoot(workspaceA as unknown as FileSystemDirectoryHandle, ['read'], 'workspace-A');
+      await expect(workspaceA.getFileHandle('recover.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
     } finally {
       vi.unstubAllGlobals();
     }

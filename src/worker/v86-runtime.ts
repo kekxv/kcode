@@ -95,9 +95,9 @@ export class V86Runtime {
   }
 
   /** Binds only the authorized directory, then mounts it only at the guest /work boundary. */
-  async attachWorkspace(handle: FileSystemDirectoryHandle): Promise<void> {
+  async attachWorkspace(handle: FileSystemDirectoryHandle, workspaceBinding: string): Promise<void> {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
-    await this.p9Server.setRoot(handle, ['read']);
+    await this.p9Server.setRoot(handle, ['read'], workspaceBinding);
     const nonce = crypto.randomUUID();
     const marker = `KCODE_MOUNT_${nonce}`;
     const mounted = this.waitForSerialMarker(marker);

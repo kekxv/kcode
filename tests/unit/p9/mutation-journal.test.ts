@@ -43,4 +43,28 @@ describe('MutationJournal', () => {
     expect(restored).toEqual(['recover.txt']);
     await expect(MutationJournal.begin('txn-recover', storage, key)).resolves.toBeInstanceOf(MutationJournal);
   });
+
+  it('allocates unique durable entry IDs when mutations record concurrently', async () => {
+    // Break caught: concurrent first writes can both select entry-1 and overwrite one another’s only rollback preimage.
+    const storage = new MemoryJournalStorage();
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const journal = await MutationJournal.begin('txn-concurrent', storage, key);
+    await Promise.all([
+      journal.record({ path: 'one.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 }),
+      journal.record({ path: 'two.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 }),
+    ]);
+    expect(await storage.list()).toEqual(['entry-1.bin', 'entry-2.bin']);
+  });
+
+  it('abandons a preimage-only crash record when the workspace no longer matches its original state', async () => {
+    // Break caught: crashing after the durable preimage but before expected-state capture must not make every later attach fail forever.
+    const storage = new MemoryJournalStorage();
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const initial = await MutationJournal.begin('txn-pending', storage, key);
+    await initial.record({ path: 'created.txt', operation: 'create', original: { exists: false }, resultingBytes: 4 });
+
+    const recovered = await MutationJournal.openExisting('txn-pending', storage, key);
+    await expect(recovered.recoverConservatively(async () => false, async () => undefined)).resolves.toBe('abandoned');
+    expect(await storage.list()).toEqual([]);
+  });
 });

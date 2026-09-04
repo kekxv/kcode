@@ -6,7 +6,7 @@ export const MAX_JOURNAL_TRANSACTION_BYTES = 100 * 1024 * 1024;
 export type JournalEntrySummary = { path: string; operation: 'create' | 'write' | 'delete' | 'rename'; originalBytes: number; resultingBytes: number };
 export type JournalSummary = { transactionId: string; state: 'clean' | 'dirty' | 'needs-rollback' | 'conflict'; entries: readonly JournalEntrySummary[]; journalBytes: number; writtenBytes: number };
 export type JournalOriginal = { exists: boolean; kind?: FileSystemHandleKind; bytes?: Uint8Array; lastModified?: number; size?: number; sha256?: string };
-export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; expected?: JournalOriginal | null; resultingBytes: number };
+export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; expected?: JournalOriginal | null; phase?: 'prepared' | 'applied'; resultingBytes: number };
 export type JournalStorage = { put(name: string, bytes: Uint8Array): Promise<void>; get(name: string): Promise<Uint8Array | null>; remove(name: string): Promise<void>; list(): Promise<string[]>; clear(): Promise<void> };
 type EncryptedRecord = { iv: Uint8Array; ciphertext: Uint8Array };
 
@@ -36,14 +36,21 @@ export class OpfsJournalStorage implements JournalStorage {
     const root = await storage.call(navigator.storage);
     return root.getDirectoryHandle('kcode-journal', create ? { create: true } : undefined);
   }
-  static async open(transactionId: string): Promise<OpfsJournalStorage> {
-    const journal = await this.journalRoot(true);
+  private static validId(value: string): boolean { return /^[A-Za-z0-9_-]{1,64}$/.test(value); }
+  private static async workspaceRoot(workspaceId: string, create: boolean): Promise<FileSystemDirectoryHandle> {
+    if (!this.validId(workspaceId)) throw new Error('INVALID_WORKSPACE_BINDING');
+    const journal = await this.journalRoot(create);
+    return journal.getDirectoryHandle(workspaceId, create ? { create: true } : undefined);
+  }
+  static async open(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> {
+    if (!this.validId(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
+    const journal = await this.workspaceRoot(workspaceId, true);
     return new OpfsJournalStorage(await journal.getDirectoryHandle(transactionId, { create: true }));
   }
-  static async openExisting(transactionId: string): Promise<OpfsJournalStorage> { return new OpfsJournalStorage(await (await this.journalRoot(false)).getDirectoryHandle(transactionId)); }
-  static async transactionIds(): Promise<string[]> {
+  static async openExisting(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> { return new OpfsJournalStorage(await (await this.workspaceRoot(workspaceId, false)).getDirectoryHandle(transactionId)); }
+  static async transactionIds(workspaceId: string): Promise<string[]> {
     try {
-      const journal = await this.journalRoot(false); const ids: string[] = [];
+      const journal = await this.workspaceRoot(workspaceId, false); const ids: string[] = [];
       for await (const [name, handle] of (journal as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) if (handle.kind === 'directory' && /^[A-Za-z0-9_-]{1,64}$/.test(name)) ids.push(name);
       return ids.sort();
     } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return []; throw error; }
@@ -62,6 +69,7 @@ export class MutationJournal {
   private state: JournalSummary['state'] = 'clean';
   private journalBytes = 0;
   private writtenBytes = 0;
+  private mutex: Promise<void> = Promise.resolve();
   private constructor(readonly transactionId: string, private readonly storage: JournalStorage, private readonly key: CryptoKey) {}
 
   static async begin(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
@@ -91,14 +99,15 @@ export class MutationJournal {
   summary(): JournalSummary { return { transactionId: this.transactionId, state: this.state, entries: [...this.entries], journalBytes: this.journalBytes, writtenBytes: this.writtenBytes }; }
   markNeedsRollback(): void { if (this.state === 'dirty') this.state = 'needs-rollback'; }
 
-  async record(record: JournalRecord): Promise<void> {
+  async record(record: JournalRecord): Promise<void> { await this.serialized(() => this.recordUnlocked(record)); }
+  private async recordUnlocked(record: JournalRecord): Promise<void> {
     if (this.state === 'needs-rollback' || this.state === 'conflict') throw new Error('JOURNAL_NOT_MUTABLE');
     if (this.records.some((entry) => entry.record.path === record.path)) return;
     const original = record.original.bytes ?? new Uint8Array();
     if (original.byteLength > MAX_JOURNAL_FILE_BYTES || record.resultingBytes > MAX_JOURNAL_FILE_BYTES) throw new Error('JOURNAL_FILE_LIMIT');
     if (this.writtenBytes + record.resultingBytes > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
     const id = this.records.length + 1;
-    const normalized: JournalRecord = { ...record, expected: record.expected ?? null, original: { ...record.original, bytes: original } };
+    const normalized: JournalRecord = { ...record, phase: 'prepared', expected: null, original: { ...record.original, bytes: original } };
     const encrypted = await this.encrypt(id, normalized);
     if (this.journalBytes + encrypted.byteLength > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
     await this.storage.put(nameFor(id), encrypted);
@@ -108,15 +117,21 @@ export class MutationJournal {
   }
 
   /** Persists the post-operation state after the FSA mutation completed. */
-  async setExpected(path: string, expected: JournalOriginal): Promise<void> {
+  async setExpected(path: string, expected: JournalOriginal): Promise<void> { await this.serialized(() => this.setExpectedUnlocked(path, expected)); }
+  private async setExpectedUnlocked(path: string, expected: JournalOriginal): Promise<void> {
     const entry = this.records.find((candidate) => candidate.record.path === path);
     if (!entry || this.state === 'clean' || this.state === 'conflict') throw new Error('JOURNAL_EXPECTED_STATE_INVALID');
+    entry.record.phase = 'applied';
     entry.record.expected = { ...expected, bytes: undefined };
     await this.storage.put(nameFor(entry.id), await this.encrypt(entry.id, entry.record));
   }
 
-  async commit(): Promise<void> { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.storage.clear(); this.state = 'clean'; }
+  async commit(): Promise<void> { await this.serialized(async () => { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.storage.clear(); this.state = 'clean'; }); }
   async rollback(
+    verifyOrRestore: ((path: string, expected: JournalOriginal) => Promise<boolean | void>) | ((path: string, original: JournalOriginal) => Promise<void>),
+    maybeRestore?: (path: string, original: JournalOriginal) => Promise<void>,
+  ): Promise<void> { await this.serialized(() => this.rollbackUnlocked(verifyOrRestore, maybeRestore)); }
+  private async rollbackUnlocked(
     verifyOrRestore: ((path: string, expected: JournalOriginal) => Promise<boolean | void>) | ((path: string, original: JournalOriginal) => Promise<void>),
     maybeRestore?: (path: string, original: JournalOriginal) => Promise<void>,
   ): Promise<void> {
@@ -128,6 +143,33 @@ export class MutationJournal {
     for (const record of records) if (maybeRestore && (!record.expected || await verify(record.path, record.expected) === false)) { this.state = 'conflict'; throw new Error('WORKSPACE_CONFLICT'); }
     for (const record of records.reverse()) await restore(record.path, record.original);
     await this.storage.clear(); this.state = 'clean';
+  }
+
+  /** Recovery for the preimage-to-poststate crash window. Ambiguous entries never overwrite the workspace. */
+  async recoverConservatively(
+    matchesOriginal: (path: string, original: JournalOriginal) => Promise<boolean>,
+    restore: (path: string, original: JournalOriginal) => Promise<void>,
+    matchesExpected?: (path: string, expected: JournalOriginal) => Promise<boolean>,
+  ): Promise<'recovered' | 'abandoned'> {
+    return this.serialized(async () => {
+      if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
+      const records: JournalRecord[] = [];
+      for (const { id } of this.records) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); records.push(await this.decrypt(id, encrypted)); }
+      const pending = records.filter((record) => record.phase !== 'applied' || !record.expected);
+      if (pending.length) {
+        const originalsMatch = await Promise.all(pending.map((record) => matchesOriginal(record.path, record.original)));
+        if (originalsMatch.some((matches) => !matches)) {
+          await this.storage.clear(); this.state = 'clean';
+          return 'abandoned';
+        }
+      }
+      if (matchesExpected) for (const record of records) if (record.phase === 'applied' && record.expected && !(await matchesExpected(record.path, record.expected))) {
+        this.state = 'conflict'; throw new Error('WORKSPACE_CONFLICT');
+      }
+      for (const record of records.reverse()) await restore(record.path, record.original);
+      await this.storage.clear(); this.state = 'clean';
+      return 'recovered';
+    });
   }
 
   private async encrypt(id: number, record: JournalRecord): Promise<Uint8Array> {
@@ -151,6 +193,14 @@ export class MutationJournal {
       || !['create', 'write', 'delete', 'rename'].includes(record.operation)
       || !Number.isSafeInteger(record.resultingBytes) || record.resultingBytes < 0 || record.resultingBytes > MAX_JOURNAL_FILE_BYTES
       || !record.original || typeof record.original.exists !== 'boolean'
+      || (record.phase !== undefined && record.phase !== 'prepared' && record.phase !== 'applied')
       || (record.expected !== null && record.expected !== undefined && typeof record.expected.exists !== 'boolean')) throw new Error('JOURNAL_TAMPERED');
+  }
+  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutex;
+    let release!: () => void;
+    this.mutex = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 }

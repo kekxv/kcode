@@ -42,8 +42,9 @@ export const isValidNetworkMode = (value: unknown): value is NetworkMode => {
 
 export const isValidWorkspaceSession = (value: unknown): value is WorkspaceSession =>
   isPlainRecord(value)
-  && hasExactKeys(value, ['mode', 'capabilities', 'network'])
+  && hasExactKeys(value, ['mode', 'workspaceId', 'capabilities', 'network'])
   && value.mode === 'workspace'
+  && typeof value.workspaceId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value.workspaceId)
   && Array.isArray(value.capabilities)
   && value.capabilities.every(isCapability)
   && new Set(value.capabilities).size === value.capabilities.length
@@ -61,7 +62,8 @@ const parseRelayUrl = (value: unknown): string => {
 
 /** Parses only the exact workspace session shape allowed across trust boundaries. */
 export const parseSession = (value: unknown): WorkspaceSession => {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ['mode', 'capabilities', 'network']) || value.mode !== 'workspace') {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ['mode', 'workspaceId', 'capabilities', 'network']) || value.mode !== 'workspace'
+    || typeof value.workspaceId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.workspaceId)) {
     return invalidSession();
   }
   if (!Array.isArray(value.capabilities) || !value.capabilities.every(isCapability)
@@ -70,11 +72,12 @@ export const parseSession = (value: unknown): WorkspaceSession => {
   if (!isPlainRecord(value.network)) return invalidSession();
   if (value.network.mode === 'offline') {
     if (!hasExactKeys(value.network, ['mode'])) return invalidSession();
-    return { mode: 'workspace', capabilities, network: { mode: 'offline' } };
+    return { mode: 'workspace', workspaceId: value.workspaceId, capabilities, network: { mode: 'offline' } };
   }
   if (value.network.mode !== 'wisp' || !hasExactKeys(value.network, ['mode', 'relayUrl'])) return invalidSession();
   return {
     mode: 'workspace',
+    workspaceId: value.workspaceId,
     capabilities,
     network: { mode: 'wisp', relayUrl: parseRelayUrl(value.network.relayUrl) },
   };
@@ -99,6 +102,10 @@ export class WorkspaceSessionAuthorizer {
 
   canAttachWorkspace(): boolean {
     return this.activeSession?.mode === 'workspace';
+  }
+
+  workspaceBinding(): string | null {
+    return this.activeSession?.workspaceId ?? null;
   }
 
   /** Mutation authority is fixed at VM_INIT and cannot be supplied by a later guest-facing request. */

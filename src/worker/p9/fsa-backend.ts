@@ -6,6 +6,7 @@ import { ERRNO, type LinuxErrno } from './constants';
 
 export const FSA_OPERATION_TIMEOUT_MS = 30_000;
 export const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_JOURNAL_DIRECTORY_ENTRIES = 4_096;
 
 export class P9Error extends Error {
   constructor(readonly errno: LinuxErrno, message: string) { super(message); this.name = 'P9Error'; }
@@ -106,7 +107,7 @@ export class FsaBackend {
   /** Captures a confined preimage for the journal without granting guest read authority. */
   async snapshot(segments: readonly string[]): Promise<FsaSnapshot> {
     checkSegments(segments);
-    try { const handle = await this.handle(segments); if (handle.kind === 'directory') return { exists: true, kind: 'directory', size: 0 }; const file = await this.deadline((handle as FileSystemFileHandle).getFile()); if (file.size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'Journal preimage exceeds file limit.'); const bytes = new Uint8Array(await this.deadline(file.arrayBuffer())); return { exists: true, kind: 'file', bytes, lastModified: file.lastModified, size: file.size, sha256: await this.hash(bytes) }; } catch (error) { if (error instanceof P9Error && error.errno === ERRNO.ENOENT) return { exists: false }; throw error; }
+    try { const handle = await this.handle(segments); if (handle.kind === 'directory') return { exists: true, kind: 'directory', size: 0, sha256: await this.directoryFingerprint(handle as FileSystemDirectoryHandle, segments, 0) }; const file = await this.deadline((handle as FileSystemFileHandle).getFile()); if (file.size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'Journal preimage exceeds file limit.'); const bytes = new Uint8Array(await this.deadline(file.arrayBuffer())); return { exists: true, kind: 'file', bytes, lastModified: file.lastModified, size: file.size, sha256: await this.hash(bytes) }; } catch (error) { if (error instanceof P9Error && error.errno === ERRNO.ENOENT) return { exists: false }; throw error; }
   }
 
   /** Restores a preimage during rollback/recovery; this never constructs a host path. */
@@ -114,13 +115,13 @@ export class FsaBackend {
     checkSegments(segments); const parent = segments.slice(0, -1); const name = segments.at(-1); if (!name) return;
     await this.withLocks([segments, parent], async () => {
       const directory = await this.directory(parent);
-      if (!snapshot.exists) { try { await this.deadline(directory.removeEntry(name, { recursive: true })); } catch (error) { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') mapDomException(error); } return; }
+      if (!snapshot.exists) { try { await this.deadline(directory.removeEntry(name)); } catch (error) { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') mapDomException(error); } return; }
       if (snapshot.kind === 'directory') { try { await this.deadline(directory.getDirectoryHandle(name, { create: true })); } catch (error) { mapDomException(error); } return; }
       try { const file = await this.deadline(directory.getFileHandle(name, { create: true })); const writable = await this.deadline(file.createWritable()); await this.deadline(writable.write((snapshot.bytes ?? new Uint8Array()) as unknown as FileSystemWriteChunkType)); await this.deadline(writable.close()); } catch (error) { mapDomException(error); }
     });
   }
 
-  private require(capability: WorkspaceCapability): void { if (!hasWorkspaceCapability({ mode: 'workspace', capabilities: this.policy, network: { mode: 'offline' } }, capability)) p9(ERRNO.EACCES, `Missing ${capability} capability.`); }
+  private require(capability: WorkspaceCapability): void { if (!hasWorkspaceCapability({ mode: 'workspace', workspaceId: 'internal', capabilities: this.policy, network: { mode: 'offline' } }, capability)) p9(ERRNO.EACCES, `Missing ${capability} capability.`); }
   private offset(value: number): void { if (!Number.isSafeInteger(value) || value < 0) p9(ERRNO.EINVAL, 'Invalid file offset.'); }
   private count(value: number): void { if (!Number.isSafeInteger(value) || value < 0) p9(ERRNO.EINVAL, 'Invalid byte count.'); }
   async matchesSnapshot(segments: readonly string[], expected: FsaSnapshot): Promise<boolean> {
@@ -134,6 +135,25 @@ export class FsaBackend {
   private async hash(bytes: Uint8Array): Promise<string> {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource));
     return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  private async directoryFingerprint(directory: FileSystemDirectoryHandle, segments: readonly string[], depth: number): Promise<string> {
+    if (depth >= 64) p9(ERRNO.EIO, 'Journal directory fingerprint exceeds depth limit.');
+    const entries: Array<readonly [string, FileSystemHandleKind, string]> = [];
+    try {
+      for await (const [name, handle] of (directory as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+        if (entries.length >= MAX_JOURNAL_DIRECTORY_ENTRIES) p9(ERRNO.EIO, 'Journal directory fingerprint exceeds entry limit.');
+        await this.confine(handle, [...segments, name]);
+        if (handle.kind === 'directory') entries.push([name, 'directory', await this.directoryFingerprint(handle as FileSystemDirectoryHandle, [...segments, name], depth + 1)]);
+        else {
+          const file = await this.deadline((handle as FileSystemFileHandle).getFile());
+          if (file.size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'Journal directory file exceeds limit.');
+          const bytes = new Uint8Array(await this.deadline(file.arrayBuffer()));
+          entries.push([name, 'file', JSON.stringify([file.size, file.lastModified, await this.hash(bytes)])]);
+        }
+      }
+    } catch (error) { return mapDomException(error); }
+    entries.sort(([left], [right]) => left.localeCompare(right));
+    return this.hash(textEncoder.encode(JSON.stringify(entries)));
   }
   private async deadline<T>(operation: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;

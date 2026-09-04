@@ -95,7 +95,7 @@ describe('Chrome Port protocol guards', () => {
     };
 
     expect(isAuthorizedVMRequest(attach, authorizer)).toBe(false);
-    authorizer.activate({ mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } });
+    authorizer.activate({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } });
     expect(isAuthorizedVMRequest(attach, authorizer)).toBe(true);
     authorizer.clear();
     expect(isAuthorizedVMRequest(attach, authorizer)).toBe(false);
@@ -106,9 +106,9 @@ describe('Chrome Port protocol guards', () => {
     const authorizer = new WorkspaceSessionAuthorizer();
     const begin = { kind: 'VM_BEGIN_TRANSACTION', requestId: 'req-1', transactionId: 'tx_1' };
     expect(isVMRequest(begin)).toBe(true);
-    authorizer.activate({ mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } });
+    authorizer.activate({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } });
     expect(isAuthorizedVMRequest(begin, authorizer)).toBe(false);
-    authorizer.activate({ mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } });
+    authorizer.activate({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } });
     expect(isAuthorizedVMRequest(begin, authorizer)).toBe(true);
   });
 
@@ -123,6 +123,7 @@ describe('Chrome Port protocol guards', () => {
       requestId: 'req-1',
       session: {
         mode: 'workspace',
+        workspaceId: 'workspace-1',
         capabilities: ['read'],
         network: { mode: 'wisp', relayUrl },
       },

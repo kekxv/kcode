@@ -72,7 +72,9 @@ async function dispatch(value: unknown): Promise<void> {
   if (value.kind === 'VM_ATTACH_WORKSPACE') {
     const generation = lifecycleGeneration;
     try {
-      await runtime?.attachWorkspace(value.handle);
+      const workspaceBinding = authorizer.workspaceBinding();
+      if (!workspaceBinding) throw new Error('VM_UNAUTHORIZED_REQUEST');
+      await runtime?.attachWorkspace(value.handle, workspaceBinding);
       if (!isCurrent(generation)) return;
       if (!runtime) throw new Error('VM_RUNTIME_NOT_READY');
       workspaceAttached = true;

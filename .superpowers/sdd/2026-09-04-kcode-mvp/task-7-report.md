@@ -6,7 +6,10 @@
 - `FsaBackend` uses root-handle-only traversal, exact `root.resolve()` confinement, protected-path filtering/denial, capability checks, bounded I/O, and per-path locks.
 - Mutations require an approved transaction. `VM_BEGIN_TRANSACTION` carries only an ID: its capabilities are derived from the immutable session admitted by `VM_INIT`, never from guest-facing input. Commit and rollback revoke the transaction policy afterwards.
 - Rollback journal entries are AES-GCM encrypted with an origin-local, non-extractable IndexedDB key. The key store now upgrades an existing `kcode` IndexedDB database that predates `security-keys`.
-- Startup enumerates durable OPFS transaction directories, decrypts and validates every journal record with that persistent key, verifies expected post-mutation state, and recovers only when it can preserve both versions. Reusing a nonempty transaction ID is rejected.
+- Durable journal allocation is serialized both within a journal and across server mutation setup, so concurrent first and subsequent mutations receive distinct encrypted record IDs and rollback retains every preimage.
+- Durable OPFS journals are scoped as `kcode-journal/<authenticated-workspace-id>/<transaction-id>`. The VM Worker obtains that binding only from the canonical session admitted at `VM_INIT`; attach and transaction messages cannot provide or replace it. Startup enumerates only the selected workspace namespace.
+- Records persist an explicit `prepared` → `applied` lifecycle. On restart, verified applied records roll back normally; an ambiguous prepared record that no longer matches its preimage is abandoned without modifying the workspace, so a crash in the expected-state capture window cannot permanently block attachment.
+- Directory snapshots carry a bounded recursive SHA-256 fingerprint. Rollback verifies it before restoring and never uses recursive removal as a fallback, preserving an externally added descendant.
 - Before rollback, every FSA target must match its encrypted expected post-mutation `kind`, size, mtime, and SHA-256. A host-side edit produces `WORKSPACE_CONFLICT`; no preimage is restored.
 - Transaction finalization blocks new mutations, rejects replacement of dirty or active transactions, and drains/poisons active mutations before rollback. A nonempty directory unlink is rejected with `ENOTEMPTY`; recursive deletion is never attempted with a one-node journal entry.
 - FSA operations that time out retain their mutation locks until their underlying, non-abortable promise settles. A timeout poisons the transaction and requires rollback before any subsequent mutation.
@@ -16,7 +19,7 @@
 
 ```text
 npm run test:run -- tests/unit/p9 tests/unit/journal-key.test.ts tests/security/resource-limits.test.ts tests/unit/vm-worker.test.ts tests/unit/protocol.test.ts tests/integration/vm-smoke.test.ts
-9 files passed; 64 tests passed; 1 real-VM test skipped by default
+9 files passed; 69 tests passed; 1 real-VM test skipped by default
 
 npm run typecheck
 exit 0

@@ -11,6 +11,7 @@ class FakeRuntime {
   readonly sent: string[] = [];
   bootConfig: unknown;
   transaction: { transactionId: string; capabilities: readonly string[] } | null = null;
+  workspaceBinding: string | null = null;
 
   constructor(_options: unknown) {
     FakeRuntime.instances.push(this);
@@ -29,7 +30,7 @@ class FakeRuntime {
     return () => this.listeners.delete(listener);
   }
 
-  async attachWorkspace(): Promise<void> {}
+  async attachWorkspace(_handle: FileSystemDirectoryHandle, workspaceBinding: string): Promise<void> { this.workspaceBinding = workspaceBinding; }
   beginTransaction(transactionId: string, capabilities: readonly string[]): void { this.transaction = { transactionId, capabilities }; }
   async commitTransaction(): Promise<void> { this.transaction = null; }
   async rollbackTransaction(): Promise<void> { this.transaction = null; }
@@ -44,7 +45,7 @@ class FakeRuntime {
   emit(delta: string): void { for (const listener of this.listeners) listener(delta); }
 }
 
-const session = { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } } as const;
+const session = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } } as const;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -111,7 +112,7 @@ describe('vm.worker lifecycle correlation', () => {
     vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
-    const writeSession = { mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } as const;
+    const writeSession = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } as const;
 
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session: writeSession } } as MessageEvent);
     FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
@@ -119,6 +120,7 @@ describe('vm.worker lifecycle correlation', () => {
     await Promise.resolve(); await Promise.resolve();
     worker.onmessage?.({ data: { kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_1' } } as MessageEvent);
 
+    expect(FakeRuntime.instances[0].workspaceBinding).toBe('workspace-1');
     expect(FakeRuntime.instances[0].transaction).toEqual({ transactionId: 'tx_1', capabilities: ['read', 'write', 'delete'] });
     expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'begin' });
   });
