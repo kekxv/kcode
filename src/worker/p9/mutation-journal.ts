@@ -59,7 +59,13 @@ export class OpfsJournalStorage implements JournalStorage {
   static async transactionIds(workspaceId: string): Promise<string[]> {
     try {
       const journal = await this.workspaceRoot(workspaceId, false); const ids: string[] = [];
-      for await (const [name, handle] of (journal as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) if (handle.kind === 'directory' && /^[A-Za-z0-9_-]{1,64}$/.test(name)) ids.push(name);
+      for await (const [name, handle] of (journal as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+        if (handle.kind !== 'directory' || !this.validId(name)) continue;
+        for await (const _entry of (handle as FileSystemDirectoryHandle as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+          ids.push(name);
+          break;
+        }
+      }
       return ids.sort();
     } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return []; throw error; }
   }

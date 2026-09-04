@@ -156,6 +156,35 @@ describe('P9Server lifecycle', () => {
     }
   });
 
+  it('distinguishes an empty pre-record OPFS directory from a nonempty malformed journal during recovery', async () => {
+    // Break caught: a key-store failure after OPFS open leaves an empty transaction directory that permanently blocks workspace attachment as tampered.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspace = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', undefined);
+    try {
+      const interrupted = new P9Server(await FsaBackend.attach(workspace as unknown as FileSystemDirectoryHandle, ['read', 'write', 'delete']));
+      interrupted.setTransactionPolicy({ transactionId: 'key-failure', capabilities: ['read', 'write', 'delete'] });
+      const replies: Uint8Array[] = [];
+      await interrupted.handle(version(), (reply) => replies.push(reply));
+      await interrupted.handle(frame(MESSAGE.Tattach, 2, new Writer().u32(0).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+      await interrupted.handle(frame(MESSAGE.Tlcreate, 3, new Writer().u32(0).string('never-created.txt').u32(0).u32(0).u32(0).finish()), (reply) => replies.push(reply));
+
+      expect(replies.at(-1)![4]).toBe(MESSAGE.Rlerror);
+      expect(await (await OpfsJournalStorage.openExisting('default', 'key-failure')).list()).toEqual([]);
+
+      vi.stubGlobal('indexedDB', indexedDB);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).resolves.toBeUndefined();
+
+      const malformed = await OpfsJournalStorage.open('default', 'malformed-journal');
+      await malformed.put('unexpected.bin', new Uint8Array([1]));
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['malformed-journal']);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).rejects.toThrow('JOURNAL_TAMPERED');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('recovers a durable journal only when the authenticated workspace binding matches', async () => {
     // Break caught: origin-wide journal enumeration can roll a prior workspace's mutation back into a newly selected directory.
     const opfsRoot = new MemoryFsaRoot();
