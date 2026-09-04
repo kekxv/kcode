@@ -181,18 +181,23 @@ describe('P9Server lifecycle', () => {
     }
   });
 
-  it('cleans an authenticated journal allocation that has no mutation records', async () => {
-    // Break caught: recovery must recognize the durable authenticated allocation state instead of treating every pre-record directory as safe or tampered.
+  it('retains an authenticated allocated manifest replayed over an unfinished journal', async () => {
+    // Break caught: replaying an old allocated manifest over an active transaction must not silently erase evidence of an unfinished host mutation.
     const opfsRoot = new MemoryFsaRoot();
     const workspace = new MemoryFsaRoot();
     vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
     vi.stubGlobal('indexedDB', indexedDB);
     try {
-      await MutationJournal.begin('allocated-only', await OpfsJournalStorage.open('default', 'allocated-only'));
+      const storage = await OpfsJournalStorage.open('default', 'allocated-only');
+      const journal = await MutationJournal.begin('allocated-only', storage);
+      const allocatedManifest = await storage.get('journal-metadata.bin');
+      await journal.record({ path: 'unfinished.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 });
+      await storage.put('journal-metadata.bin', allocatedManifest!);
+      await storage.remove('entry-1.bin');
 
       await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['allocated-only']);
-      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).resolves.toBeUndefined();
-      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual([]);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).rejects.toThrow('JOURNAL_RECOVERY_REQUIRED');
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['allocated-only']);
     } finally {
       vi.unstubAllGlobals();
     }

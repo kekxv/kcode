@@ -48,6 +48,34 @@ describe('MutationJournal', () => {
     await expect(MutationJournal.begin('txn-recover', storage, key)).resolves.toBeInstanceOf(MutationJournal);
   });
 
+  it('rejects journal ciphertext copied to another workspace under the same transaction ID', async () => {
+    // Break caught: transaction-only authentication lets one workspace's rollback records be replayed against another selected directory.
+    const source = new MemoryJournalStorage('workspace-A');
+    const destination = new MemoryJournalStorage('workspace-B');
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const journal = await MutationJournal.begin('shared-txn', source, key);
+    await journal.record({ path: 'copied.txt', operation: 'create', original: { exists: false }, resultingBytes: 6 });
+    await journal.setExpected('copied.txt', { exists: true, kind: 'file', size: 6, lastModified: 2, sha256: 'copied' });
+    for (const name of await source.list()) await destination.put(name, (await source.get(name))!);
+    const copiedNames = await destination.list();
+
+    await expect(MutationJournal.openExisting('shared-txn', destination, key)).rejects.toThrow('JOURNAL_TAMPERED');
+    await expect(destination.list()).resolves.toEqual(copiedNames);
+  });
+
+  it('rejects commit while a durable record is still prepared and preserves the journal', async () => {
+    // Break caught: commit must not erase a preimage when the host mutation never persisted an authenticated applied post-state.
+    const storage = new MemoryJournalStorage();
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const journal = await MutationJournal.begin('txn-prepared-commit', storage, key);
+    await journal.record({ path: 'pending.txt', operation: 'write', original: { exists: true, bytes: new TextEncoder().encode('before') }, resultingBytes: 5 });
+    const durableNames = await storage.list();
+
+    await expect(journal.commit()).rejects.toThrow('JOURNAL_NOT_APPLIED');
+    await expect(storage.list()).resolves.toEqual(durableNames);
+    await expect(MutationJournal.openExisting('txn-prepared-commit', storage, key)).resolves.toBeInstanceOf(MutationJournal);
+  });
+
   it('allocates unique durable entry IDs when mutations record concurrently', async () => {
     // Break caught: concurrent first writes can both select entry-1 and overwrite one another’s only rollback preimage.
     const storage = new MemoryJournalStorage();
@@ -120,6 +148,7 @@ describe('MutationJournal', () => {
     const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
     const journal = await MutationJournal.begin('txn-committed', await OpfsJournalStorage.open('workspace-1', 'txn-committed'), key);
     await journal.record({ path: 'created.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 });
+    await journal.setExpected('created.txt', { exists: true, kind: 'file', size: 1, lastModified: 1, sha256: 'committed' });
 
     await journal.commit();
 

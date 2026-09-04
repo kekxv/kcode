@@ -7,11 +7,11 @@ export type JournalEntrySummary = { path: string; operation: 'create' | 'write' 
 export type JournalSummary = { transactionId: string; state: 'clean' | 'dirty' | 'needs-rollback' | 'conflict'; entries: readonly JournalEntrySummary[]; journalBytes: number; writtenBytes: number };
 export type JournalOriginal = { exists: boolean; kind?: FileSystemHandleKind; bytes?: Uint8Array; lastModified?: number; size?: number; sha256?: string };
 export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; expected?: JournalOriginal | null; phase?: 'prepared' | 'applied'; resultingBytes: number };
-export type JournalStorage = { put(name: string, bytes: Uint8Array): Promise<void>; get(name: string): Promise<Uint8Array | null>; remove(name: string): Promise<void>; list(): Promise<string[]>; clear(): Promise<void> };
-type EncryptedRecord = { iv: Uint8Array; ciphertext: Uint8Array };
+export type JournalStorage = { readonly workspaceBinding: string; put(name: string, bytes: Uint8Array): Promise<void>; get(name: string): Promise<Uint8Array | null>; remove(name: string): Promise<void>; list(): Promise<string[]>; clear(): Promise<void> };
 type DurableJournalStatus = 'allocated' | 'active' | 'finished';
 type DurableJournalMetadata = {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  workspaceBinding: string;
   transactionId: string;
   status: DurableJournalStatus;
   outcome: 'committed' | 'rolled-back' | null;
@@ -22,14 +22,16 @@ type DurableJournalMetadata = {
 const encoder = new TextEncoder(); const decoder = new TextDecoder();
 const asBase64 = (value: Uint8Array): string => btoa(String.fromCharCode(...value));
 const fromBase64 = (value: string): Uint8Array => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-const context = (transactionId: string, entryId: number): Uint8Array => encoder.encode(JSON.stringify({ transactionId, entryId, schemaVersion: 1 }));
-const metadataContext = (transactionId: string): Uint8Array => encoder.encode(JSON.stringify({ transactionId, kind: 'journal-metadata', schemaVersion: 1 }));
+const validWorkspaceBinding = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+const context = (workspaceBinding: string, transactionId: string, entryId: number): Uint8Array => encoder.encode(JSON.stringify({ workspaceBinding, transactionId, entryId, kind: 'journal-record', schemaVersion: 2 }));
+const metadataContext = (workspaceBinding: string, transactionId: string): Uint8Array => encoder.encode(JSON.stringify({ workspaceBinding, transactionId, kind: 'journal-metadata', schemaVersion: 2 }));
 const nameFor = (entryId: number): string => `entry-${entryId}.bin`;
 const METADATA_NAME = 'journal-metadata.bin';
 
 /** Minimal durable-storage double used only for tests. */
 export class MemoryJournalStorage implements JournalStorage {
   private readonly values = new Map<string, Uint8Array>();
+  constructor(readonly workspaceBinding = 'default') { if (!validWorkspaceBinding(workspaceBinding)) throw new Error('INVALID_WORKSPACE_BINDING'); }
   async put(name: string, bytes: Uint8Array): Promise<void> { this.values.set(name, new Uint8Array(bytes)); }
   async get(name: string): Promise<Uint8Array | null> { const value = this.values.get(name); return value ? new Uint8Array(value) : null; }
   async remove(name: string): Promise<void> { this.values.delete(name); }
@@ -41,6 +43,7 @@ export class MemoryJournalStorage implements JournalStorage {
 /** OPFS transaction directory; records are encrypted before reaching this store. */
 export class OpfsJournalStorage implements JournalStorage {
   private constructor(
+    readonly workspaceBinding: string,
     private readonly parent: FileSystemDirectoryHandle,
     private readonly transactionId: string,
     private readonly directory: FileSystemDirectoryHandle,
@@ -60,12 +63,12 @@ export class OpfsJournalStorage implements JournalStorage {
   static async open(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> {
     if (!this.validId(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
     const journal = await this.workspaceRoot(workspaceId, true);
-    return new OpfsJournalStorage(journal, transactionId, await journal.getDirectoryHandle(transactionId, { create: true }));
+    return new OpfsJournalStorage(workspaceId, journal, transactionId, await journal.getDirectoryHandle(transactionId, { create: true }));
   }
   static async openExisting(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> {
     if (!this.validId(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
     const journal = await this.workspaceRoot(workspaceId, false);
-    return new OpfsJournalStorage(journal, transactionId, await journal.getDirectoryHandle(transactionId));
+    return new OpfsJournalStorage(workspaceId, journal, transactionId, await journal.getDirectoryHandle(transactionId));
   }
   static async transactionIds(workspaceId: string): Promise<string[]> {
     try {
@@ -98,19 +101,26 @@ export class MutationJournal {
   private journalBytes = 0;
   private writtenBytes = 0;
   private mutex: Promise<void> = Promise.resolve();
-  private constructor(readonly transactionId: string, private readonly storage: JournalStorage, private readonly key: CryptoKey) {}
+  private constructor(
+    readonly transactionId: string,
+    private readonly storage: JournalStorage,
+    private readonly key: CryptoKey,
+    private readonly workspaceBinding: string,
+  ) {}
 
   static async begin(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
+    if (!validWorkspaceBinding(storage.workspaceBinding)) throw new Error('INVALID_WORKSPACE_BINDING');
     if ((await storage.list()).length) throw new Error('JOURNAL_TRANSACTION_EXISTS');
-    const journal = new MutationJournal(transactionId, storage, await key);
+    const journal = new MutationJournal(transactionId, storage, await key, storage.workspaceBinding);
     await journal.persistMetadata('allocated', null, []);
     return journal;
   }
   /** Rehydrates a pre-existing transaction without ever treating its records as a new journal. */
   static async openExisting(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
-    const journal = new MutationJournal(transactionId, storage, await key);
+    if (!validWorkspaceBinding(storage.workspaceBinding)) throw new Error('INVALID_WORKSPACE_BINDING');
+    const journal = new MutationJournal(transactionId, storage, await key, storage.workspaceBinding);
     const metadataBytes = await storage.get(METADATA_NAME);
     if (!metadataBytes) throw new Error('JOURNAL_TAMPERED');
     const metadata = await journal.decryptMetadata(metadataBytes);
@@ -171,7 +181,15 @@ export class MutationJournal {
     entry.sha256 = updatedEntry.sha256;
   }
 
-  async commit(): Promise<void> { await this.serialized(async () => { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.readDurableRecords(); await this.persistMetadata('finished', 'committed', this.records); await this.storage.clear(); this.state = 'clean'; }); }
+  async commit(): Promise<void> {
+    await this.serialized(async () => {
+      if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
+      const records = await this.readDurableRecords();
+      if (records.some((record) => record.phase !== 'applied' || !record.expected)) throw new Error('JOURNAL_NOT_APPLIED');
+      await this.persistMetadata('finished', 'committed', this.records);
+      await this.storage.clear(); this.state = 'clean';
+    });
+  }
   async rollback(
     verifyOrRestore: ((path: string, expected: JournalOriginal) => Promise<boolean | void>) | ((path: string, original: JournalOriginal) => Promise<void>),
     maybeRestore?: (path: string, original: JournalOriginal) => Promise<void>,
@@ -199,7 +217,8 @@ export class MutationJournal {
     return this.serialized<'recovered'>(async () => {
       if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
       const records = await this.readDurableRecords();
-      if (this.durableMetadata?.status === 'allocated' || this.durableMetadata?.status === 'finished') {
+      if (this.durableMetadata?.status === 'allocated') throw new Error('JOURNAL_RECOVERY_REQUIRED');
+      if (this.durableMetadata?.status === 'finished') {
         await this.storage.clear(); this.state = 'clean'; return 'recovered';
       }
       const pending = records.filter((record) => record.phase !== 'applied' || !record.expected);
@@ -222,23 +241,34 @@ export class MutationJournal {
 
   private async encrypt(id: number, record: JournalRecord): Promise<Uint8Array> {
     const encode = (snapshot: JournalOriginal | null | undefined): Record<string, unknown> | null => snapshot ? { ...snapshot, bytes: asBase64(snapshot.bytes ?? new Uint8Array()) } : null;
-    const plaintext = encoder.encode(JSON.stringify({ ...record, original: encode(record.original), expected: encode(record.expected) }));
+    const plaintext = encoder.encode(JSON.stringify({
+      schemaVersion: 2,
+      workspaceBinding: this.workspaceBinding,
+      transactionId: this.transactionId,
+      entryId: id,
+      record: { ...record, original: encode(record.original), expected: encode(record.expected) },
+    }));
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, plaintext));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: context(this.workspaceBinding, this.transactionId, id) as unknown as BufferSource }, this.key, plaintext));
     return encoder.encode(JSON.stringify({ iv: asBase64(iv), ciphertext: asBase64(ciphertext) }));
   }
   private async decrypt(id: number, bytes: Uint8Array): Promise<JournalRecord> {
     try {
       const parsed = JSON.parse(decoder.decode(bytes)) as { iv: string; ciphertext: string };
-      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, fromBase64(parsed.ciphertext) as unknown as BufferSource);
-      const parsedRecord = JSON.parse(decoder.decode(plaintext)) as JournalRecord & { original: Omit<JournalOriginal, 'bytes'> & { bytes: string }; expected?: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null };
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: context(this.workspaceBinding, this.transactionId, id) as unknown as BufferSource }, this.key, fromBase64(parsed.ciphertext) as unknown as BufferSource);
+      type SerializedRecord = JournalRecord & { original: Omit<JournalOriginal, 'bytes'> & { bytes: string }; expected?: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null };
+      const envelope = JSON.parse(decoder.decode(plaintext)) as { schemaVersion: number; workspaceBinding: string; transactionId: string; entryId: number; record: SerializedRecord };
+      if (envelope?.schemaVersion !== 2 || envelope.workspaceBinding !== this.workspaceBinding
+        || envelope.transactionId !== this.transactionId || envelope.entryId !== id || !envelope.record) throw new Error('JOURNAL_TAMPERED');
+      const parsedRecord = envelope.record;
       const decode = (snapshot: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null | undefined): JournalOriginal | null => snapshot ? { ...snapshot, bytes: fromBase64(snapshot.bytes) } : null;
       return { ...parsedRecord, original: decode(parsedRecord.original)!, expected: decode(parsedRecord.expected) };
     } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
   }
   private async persistMetadata(status: DurableJournalStatus, outcome: DurableJournalMetadata['outcome'], records: typeof this.records): Promise<void> {
     const metadata: DurableJournalMetadata = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      workspaceBinding: this.workspaceBinding,
       transactionId: this.transactionId,
       status,
       outcome,
@@ -247,7 +277,7 @@ export class MutationJournal {
     };
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: metadataContext(this.transactionId) as unknown as BufferSource },
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: metadataContext(this.workspaceBinding, this.transactionId) as unknown as BufferSource },
       this.key,
       encoder.encode(JSON.stringify(metadata)),
     ));
@@ -258,7 +288,7 @@ export class MutationJournal {
     try {
       const parsed = JSON.parse(decoder.decode(bytes)) as { iv: string; ciphertext: string };
       const plaintext = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: metadataContext(this.transactionId) as unknown as BufferSource },
+        { name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: metadataContext(this.workspaceBinding, this.transactionId) as unknown as BufferSource },
         this.key,
         fromBase64(parsed.ciphertext) as unknown as BufferSource,
       );
@@ -266,7 +296,7 @@ export class MutationJournal {
     } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
   }
   private validateMetadata(metadata: DurableJournalMetadata): void {
-    if (!metadata || metadata.schemaVersion !== 1 || metadata.transactionId !== this.transactionId
+    if (!metadata || metadata.schemaVersion !== 2 || metadata.workspaceBinding !== this.workspaceBinding || metadata.transactionId !== this.transactionId
       || !['allocated', 'active', 'finished'].includes(metadata.status)
       || !Number.isSafeInteger(metadata.entryCount) || metadata.entryCount < 0
       || !Array.isArray(metadata.entries) || metadata.entries.length !== metadata.entryCount

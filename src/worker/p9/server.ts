@@ -33,7 +33,7 @@ export class P9Server {
   private readonly mutationIdleWaiters = new Set<() => void>();
   constructor(backend?: FsaBackend, private readonly journalFactory: JournalFactory = async (workspaceBinding, transactionId) => {
     if (typeof navigator !== 'undefined' && typeof navigator.storage !== 'undefined') return OpfsJournalStorage.open(workspaceBinding, transactionId);
-    return new MemoryJournalStorage();
+    return new MemoryJournalStorage(workspaceBinding);
   }) { this.backend = backend ?? null; }
   async setRoot(root: FileSystemDirectoryHandle, policy: readonly WorkspaceCapability[] = ['read'], workspaceBinding = 'default'): Promise<void> { if (!/^[A-Za-z0-9_-]{1,64}$/.test(workspaceBinding)) throw new P9Error(ERRNO.EACCES, 'Invalid workspace binding.'); const backend = await FsaBackend.attach(root, policy); await this.recoverDurableJournals(backend, workspaceBinding); this.backend = backend; this.workspaceBinding = workspaceBinding; this.fids.clear(); this.qids.clear(); this.transaction = null; this.journal = null; this.journalTransactionId = null; this.journalInitialization = null; this.mutationPoisoned = false; this.transactionFinalizing = false; }
   setTransactionPolicy(policy: TransactionPolicy | null): void {
