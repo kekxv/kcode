@@ -7,8 +7,8 @@
 - Mutations require an approved transaction. `VM_BEGIN_TRANSACTION` carries only an ID: its capabilities are derived from the immutable session admitted by `VM_INIT`, never from guest-facing input. Commit and rollback revoke the transaction policy afterwards.
 - Rollback journal entries are AES-GCM encrypted with an origin-local, non-extractable IndexedDB key. The key store now upgrades an existing `kcode` IndexedDB database that predates `security-keys`.
 - Durable journal allocation is serialized both within a journal and across server mutation setup, so concurrent first and subsequent mutations receive distinct encrypted record IDs and rollback retains every preimage.
-- Durable OPFS journals are scoped as `kcode-journal/<authenticated-workspace-id>/<transaction-id>`. The VM Worker obtains that binding only from the canonical session admitted at `VM_INIT`; attach and transaction messages cannot provide or replace it. Startup enumerates only the selected workspace namespace.
-- Records persist an explicit `prepared` → `applied` lifecycle. On restart, verified applied records roll back normally; an ambiguous prepared record that no longer matches its preimage is abandoned without modifying the workspace, so a crash in the expected-state capture window cannot permanently block attachment.
+- Durable OPFS journals are scoped as `kcode-journal/<authenticated-workspace-id>/<transaction-id>`. Before recovery or mount, the VM Worker verifies both that canonical `VM_INIT` ID and the attached handle against the trusted IndexedDB workspace association using the browser-native `FileSystemHandle.isSameEntry()` identity oracle. A missing association, unavailable identity proof, forged ID, or different handle fails closed before `V86Runtime.attachWorkspace`.
+- Records persist an explicit `prepared` → `applied` lifecycle. If a crash occurs after the FSA mutation but before post-state persistence, restart detects that the prepared preimage no longer matches, retains the encrypted journal and workspace exactly as found, and surfaces `WORKSPACE_CONFLICT` without recovery or mount. A prepared record that still matches its preimage is safe to restore/clear; verified applied records roll back normally.
 - Directory snapshots carry a bounded recursive SHA-256 fingerprint. Rollback verifies it before restoring and never uses recursive removal as a fallback, preserving an externally added descendant.
 - Before rollback, every FSA target must match its encrypted expected post-mutation `kind`, size, mtime, and SHA-256. A host-side edit produces `WORKSPACE_CONFLICT`; no preimage is restored.
 - Transaction finalization blocks new mutations, rejects replacement of dirty or active transactions, and drains/poisons active mutations before rollback. A nonempty directory unlink is rejected with `ENOTEMPTY`; recursive deletion is never attempted with a one-node journal entry.
@@ -18,8 +18,8 @@
 ## Fresh verification
 
 ```text
-npm run test:run -- tests/unit/p9 tests/unit/journal-key.test.ts tests/security/resource-limits.test.ts tests/unit/vm-worker.test.ts tests/unit/protocol.test.ts tests/integration/vm-smoke.test.ts
-9 files passed; 69 tests passed; 1 real-VM test skipped by default
+npm run test:run
+21 files passed; 148 tests passed; 1 real-VM test skipped by default
 
 npm run typecheck
 exit 0

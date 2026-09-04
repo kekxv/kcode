@@ -4,6 +4,7 @@ type SerialListener = (delta: string) => void;
 
 class FakeRuntime {
   static instances: FakeRuntime[] = [];
+  static attachError: Error | null = null;
   readonly listeners = new Set<SerialListener>();
   private resolveBoot!: () => void;
   private rejectBoot!: (error: Error) => void;
@@ -12,6 +13,7 @@ class FakeRuntime {
   bootConfig: unknown;
   transaction: { transactionId: string; capabilities: readonly string[] } | null = null;
   workspaceBinding: string | null = null;
+  readonly attachedHandles: FileSystemDirectoryHandle[] = [];
 
   constructor(_options: unknown) {
     FakeRuntime.instances.push(this);
@@ -30,7 +32,7 @@ class FakeRuntime {
     return () => this.listeners.delete(listener);
   }
 
-  async attachWorkspace(_handle: FileSystemDirectoryHandle, workspaceBinding: string): Promise<void> { this.workspaceBinding = workspaceBinding; }
+  async attachWorkspace(handle: FileSystemDirectoryHandle, workspaceBinding: string): Promise<void> { this.attachedHandles.push(handle); this.workspaceBinding = workspaceBinding; if (FakeRuntime.attachError) throw FakeRuntime.attachError; }
   beginTransaction(transactionId: string, capabilities: readonly string[]): void { this.transaction = { transactionId, capabilities }; }
   async commitTransaction(): Promise<void> { this.transaction = null; }
   async rollbackTransaction(): Promise<void> { this.transaction = null; }
@@ -50,8 +52,10 @@ const session = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: [
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.doUnmock('../../src/worker/v86-runtime');
+  vi.doUnmock('../../src/utils/idb-store');
   vi.resetModules();
   FakeRuntime.instances = [];
+  FakeRuntime.attachError = null;
 });
 
 describe('vm.worker lifecycle correlation', () => {
@@ -109,6 +113,7 @@ describe('vm.worker lifecycle correlation', () => {
     const postMessage = vi.fn();
     vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
     vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
     vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
@@ -123,5 +128,53 @@ describe('vm.worker lifecycle correlation', () => {
     expect(FakeRuntime.instances[0].workspaceBinding).toBe('workspace-1');
     expect(FakeRuntime.instances[0].transaction).toEqual({ transactionId: 'tx_1', capabilities: ['read', 'write', 'delete'] });
     expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'begin' });
+  });
+
+  it('rejects a different directory handle even when VM_INIT claims the persisted workspace id', async () => {
+    // Break caught: a forged session workspaceId must not let a separately attached directory consume that workspace's recovery journal.
+    class TestDirectoryHandle {}
+    const selectedHandle = new TestDirectoryHandle();
+    const wrongHandle = new TestDirectoryHandle();
+    const verifyHandleBinding = vi.fn(async (workspaceId: string, handle: FileSystemDirectoryHandle) => {
+      if (workspaceId !== 'workspace-1' || handle !== selectedHandle) throw new Error('WORKSPACE_HANDLE_MISMATCH');
+    });
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { verifyHandleBinding = verifyHandleBinding; } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'boot' }));
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: wrongHandle } } as MessageEvent);
+
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'attach', code: 'VM_ATTACH_FAILED' })));
+    expect(verifyHandleBinding).toHaveBeenCalledWith('workspace-1', wrongHandle);
+    expect(FakeRuntime.instances[0].attachedHandles).toEqual([]);
+    expect(postMessage).not.toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' });
+  });
+
+  it('surfaces an ambiguous startup journal as a workspace conflict', async () => {
+    // Break caught: collapsing recovery conflict into a generic attach error hides that an uncommitted host mutation remains durable.
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'boot' }));
+    FakeRuntime.attachError = new Error('WORKSPACE_CONFLICT');
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach-conflict', handle: new TestDirectoryHandle() } } as MessageEvent);
+
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'attach-conflict', code: 'WORKSPACE_CONFLICT' })));
+    expect(postMessage).not.toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach-conflict' });
   });
 });

@@ -349,6 +349,29 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
                   const file = await directory.getFileHandle(name, { create: true });
                   const writable = await file.createWritable(); await writable.write(contents); await writable.close();
                 }
+                let database = await new Promise<IDBDatabase>((resolveDatabase, rejectDatabase) => {
+                  const request = indexedDB.open('kcode');
+                  request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('workspace')) request.result.createObjectStore('workspace'); };
+                  request.onsuccess = () => resolveDatabase(request.result);
+                  request.onerror = () => rejectDatabase(request.error);
+                });
+                if (!database.objectStoreNames.contains('workspace')) {
+                  const version = database.version + 1; database.close();
+                  database = await new Promise<IDBDatabase>((resolveDatabase, rejectDatabase) => {
+                    const request = indexedDB.open('kcode', version);
+                    request.onupgradeneeded = () => request.result.createObjectStore('workspace');
+                    request.onsuccess = () => resolveDatabase(request.result);
+                    request.onerror = () => rejectDatabase(request.error);
+                  });
+                }
+                await new Promise<void>((resolveTransaction, rejectTransaction) => {
+                  const transaction = database.transaction('workspace', 'readwrite');
+                  transaction.objectStore('workspace').put({ workspaceId: 'workspace-1', handle: directory }, 'selected-directory');
+                  transaction.oncomplete = () => resolveTransaction();
+                  transaction.onerror = () => rejectTransaction(transaction.error);
+                  transaction.onabort = () => rejectTransaction(transaction.error);
+                });
+                database.close();
                 worker.postMessage({ kind: 'VM_ATTACH_WORKSPACE', requestId: 'worker-attach', handle: directory });
               })().catch(reject);
               return;

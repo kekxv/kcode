@@ -16,6 +16,14 @@ const directoryHandle = (): DirectoryHandle => {
   return handle;
 };
 
+const sameEntryDirectoryHandle = (entryId: string): FileSystemDirectoryHandle => {
+  const handle = { kind: 'directory', name: entryId, entryId } as unknown as FileSystemDirectoryHandle & { entryId: string };
+  Object.defineProperty(handle, 'isSameEntry', {
+    value: vi.fn(async (other: FileSystemHandle) => (other as unknown as { entryId?: string }).entryId === entryId),
+  });
+  return handle;
+};
+
 const deleteDatabase = (): Promise<void> => new Promise((resolve, reject) => {
   const request = indexedDB.deleteDatabase('kcode');
   request.onsuccess = () => resolve();
@@ -38,6 +46,25 @@ describe('WorkspaceStore', () => {
     expect(saved).toEqual({ workspaceId: expect.any(String), handle });
     expect(await store.load()).toEqual(saved);
     expect(handle.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('loads the persisted workspace after another component upgrades the shared database', async () => {
+    // Break caught: reopening the shared kcode database at a stale fixed version makes every later Worker binding check fail closed.
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('kcode', 2);
+      request.onupgradeneeded = () => request.result.createObjectStore('workspace');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction('workspace', 'readwrite');
+      transaction.objectStore('workspace').put({ workspaceId: 'persisted-id', handle: { kind: 'directory' } }, 'selected-directory');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+
+    await expect(new WorkspaceStore().load()).resolves.toEqual({ workspaceId: 'persisted-id', handle: { kind: 'directory' } });
   });
 
   it('queries read permission without escalating', async () => {
@@ -79,6 +106,17 @@ describe('WorkspaceStore', () => {
     expect((await store.load())?.handle).toBe(second.handle);
     await store.clear();
     await expect(store.load()).resolves.toBeNull();
+  });
+
+  it('binds a workspace id to the browser-authenticated directory entry rather than object identity', async () => {
+    // Break caught: accepting workspaceId alone lets a different attached handle consume the selected directory's recovery journal.
+    const store = new WorkspaceStore();
+    const selected = sameEntryDirectoryHandle('selected-entry');
+    const saved = await store.save(selected);
+
+    await expect(store.verifyHandleBinding(saved.workspaceId, sameEntryDirectoryHandle('selected-entry'))).resolves.toBeUndefined();
+    await expect(store.verifyHandleBinding(saved.workspaceId, sameEntryDirectoryHandle('wrong-entry'))).rejects.toThrow('WORKSPACE_HANDLE_MISMATCH');
+    await expect(store.verifyHandleBinding('forged-workspace-id', sameEntryDirectoryHandle('selected-entry'))).rejects.toThrow('WORKSPACE_HANDLE_MISMATCH');
   });
 
   it('maps a cancelled directory selection to a stable code', async () => {

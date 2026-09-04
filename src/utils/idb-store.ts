@@ -4,7 +4,6 @@ export type StoredWorkspace = {
 };
 
 const DATABASE_NAME = 'kcode';
-const DATABASE_VERSION = 1;
 const WORKSPACE_STORE = 'workspace';
 const SELECTED_DIRECTORY_KEY = 'selected-directory';
 
@@ -13,6 +12,7 @@ type StableErrorCode =
   | 'DIRECTORY_PERMISSION_DENIED'
   | 'INDEXEDDB_UNAVAILABLE'
   | 'USER_ACTIVATION_REQUIRED'
+  | 'WORKSPACE_HANDLE_MISMATCH'
   | 'WORKSPACE_NOT_SELECTED'
   | 'WORKSPACE_STORAGE_FAILURE';
 
@@ -48,7 +48,7 @@ const hasActiveUserGesture = (): boolean =>
 const openDatabase = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   let request: IDBOpenDBRequest;
   try {
-    request = databaseFactory().open(DATABASE_NAME, DATABASE_VERSION);
+    request = databaseFactory().open(DATABASE_NAME);
   } catch (error) {
     reject(error instanceof Error ? error : stableError('WORKSPACE_STORAGE_FAILURE'));
     return;
@@ -118,6 +118,22 @@ export class WorkspaceStore {
     if (!isStoredWorkspace(workspace)) throw stableError('WORKSPACE_STORAGE_FAILURE');
     this.cachedWorkspace = workspace;
     return workspace;
+  }
+
+  /**
+   * Uses the browser's FSA entry-identity oracle to bind a Worker attachment
+   * to the workspace association persisted by the trusted Side Panel.
+   */
+  async verifyHandleBinding(workspaceId: string, handle: FileSystemDirectoryHandle): Promise<void> {
+    const workspace = await this.load();
+    const persisted = workspace?.handle as (FileSystemDirectoryHandle & { isSameEntry?: (other: FileSystemHandle) => Promise<boolean> }) | undefined;
+    if (workspace?.workspaceId !== workspaceId || persisted?.kind !== 'directory' || handle?.kind !== 'directory'
+      || typeof persisted.isSameEntry !== 'function') throw stableError('WORKSPACE_HANDLE_MISMATCH');
+    try {
+      if (!(await persisted.isSameEntry(handle))) throw stableError('WORKSPACE_HANDLE_MISMATCH');
+    } catch {
+      throw stableError('WORKSPACE_HANDLE_MISMATCH');
+    }
   }
 
   async selectDirectory(): Promise<StoredWorkspace> {

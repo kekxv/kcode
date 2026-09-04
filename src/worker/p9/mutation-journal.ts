@@ -145,13 +145,13 @@ export class MutationJournal {
     await this.storage.clear(); this.state = 'clean';
   }
 
-  /** Recovery for the preimage-to-poststate crash window. Ambiguous entries never overwrite the workspace. */
+  /** Recovery for the preimage-to-poststate crash window. Ambiguous entries block attachment and remain durable. */
   async recoverConservatively(
     matchesOriginal: (path: string, original: JournalOriginal) => Promise<boolean>,
     restore: (path: string, original: JournalOriginal) => Promise<void>,
     matchesExpected?: (path: string, expected: JournalOriginal) => Promise<boolean>,
-  ): Promise<'recovered' | 'abandoned'> {
-    return this.serialized(async () => {
+  ): Promise<'recovered'> {
+    return this.serialized<'recovered'>(async () => {
       if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
       const records: JournalRecord[] = [];
       for (const { id } of this.records) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); records.push(await this.decrypt(id, encrypted)); }
@@ -159,8 +159,8 @@ export class MutationJournal {
       if (pending.length) {
         const originalsMatch = await Promise.all(pending.map((record) => matchesOriginal(record.path, record.original)));
         if (originalsMatch.some((matches) => !matches)) {
-          await this.storage.clear(); this.state = 'clean';
-          return 'abandoned';
+          this.state = 'conflict';
+          throw new Error('WORKSPACE_CONFLICT');
         }
       }
       if (matchesExpected) for (const record of records) if (record.phase === 'applied' && record.expected && !(await matchesExpected(record.path, record.expected))) {

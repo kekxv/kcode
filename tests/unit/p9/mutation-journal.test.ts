@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { FsaBackend } from '../../../src/worker/p9/fsa-backend';
 import { MutationJournal, MemoryJournalStorage } from '../../../src/worker/p9/mutation-journal';
+import { MemoryFsaRoot } from '../../helpers/memory-fsa';
 
 describe('MutationJournal', () => {
   it('encrypts the original file before mutation and restores it on rollback', async () => {
@@ -56,15 +58,28 @@ describe('MutationJournal', () => {
     expect(await storage.list()).toEqual(['entry-1.bin', 'entry-2.bin']);
   });
 
-  it('abandons a preimage-only crash record when the workspace no longer matches its original state', async () => {
-    // Break caught: crashing after the durable preimage but before expected-state capture must not make every later attach fail forever.
+  it('retains the journal and blocks recovery after FSA apply crashes before post-state persistence', async () => {
+    // Break caught: the exact apply-to-setExpected crash window must not silently clear the only record of an uncommitted durable host mutation.
     const storage = new MemoryJournalStorage();
     const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const root = new MemoryFsaRoot();
+    const file = await root.getFileHandle('notes.txt', { create: true });
+    const writable = await file.createWritable(); await writable.write(new TextEncoder().encode('before')); await writable.close();
+    const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write']);
+    const original = await backend.snapshot(['notes.txt']);
     const initial = await MutationJournal.begin('txn-pending', storage, key);
-    await initial.record({ path: 'created.txt', operation: 'create', original: { exists: false }, resultingBytes: 4 });
+    await initial.record({ path: 'notes.txt', operation: 'write', original, resultingBytes: 6 });
+
+    // This is the crash point: FSA has durably changed, but setExpected was never reached.
+    await backend.write(['notes.txt'], 0, new TextEncoder().encode('after!'));
 
     const recovered = await MutationJournal.openExisting('txn-pending', storage, key);
-    await expect(recovered.recoverConservatively(async () => false, async () => undefined)).resolves.toBe('abandoned');
-    expect(await storage.list()).toEqual([]);
+    await expect(recovered.recoverConservatively(
+      async (path, snapshot) => backend.matchesSnapshot(path.split('/'), snapshot),
+      async (path, snapshot) => backend.restore(path.split('/'), snapshot),
+    )).rejects.toThrow('WORKSPACE_CONFLICT');
+    const current = await (await root.getFileHandle('notes.txt')).getFile();
+    expect(new TextDecoder().decode(new Uint8Array(await current.arrayBuffer()))).toBe('after!');
+    expect(await storage.list()).toEqual(['entry-1.bin']);
   });
 });

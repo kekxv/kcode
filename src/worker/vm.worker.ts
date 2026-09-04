@@ -1,8 +1,10 @@
 import { WorkspaceSessionAuthorizer } from '../security/capabilities';
 import { isAuthorizedVMRequest, isVMRequest, type VMEvent } from '../types/protocol';
+import { WorkspaceStore } from '../utils/idb-store';
 import { V86Runtime } from './v86-runtime';
 
 const authorizer = new WorkspaceSessionAuthorizer();
+const workspaceStore = new WorkspaceStore();
 let runtime: V86Runtime | null = null;
 let serialRequestId: string | null = null;
 let lifecycleGeneration = 0;
@@ -74,13 +76,18 @@ async function dispatch(value: unknown): Promise<void> {
     try {
       const workspaceBinding = authorizer.workspaceBinding();
       if (!workspaceBinding) throw new Error('VM_UNAUTHORIZED_REQUEST');
+      await workspaceStore.verifyHandleBinding(workspaceBinding, value.handle);
       await runtime?.attachWorkspace(value.handle, workspaceBinding);
       if (!isCurrent(generation)) return;
       if (!runtime) throw new Error('VM_RUNTIME_NOT_READY');
       workspaceAttached = true;
       send({ kind: 'VM_READY', requestId });
-    } catch {
-      fail(requestId, 'VM_ATTACH_FAILED', 'The workspace could not be attached.');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'WORKSPACE_CONFLICT') {
+        fail(requestId, 'WORKSPACE_CONFLICT', 'An unfinished workspace mutation requires recovery.');
+      } else {
+        fail(requestId, 'VM_ATTACH_FAILED', 'The workspace could not be attached.');
+      }
     }
     return;
   }
