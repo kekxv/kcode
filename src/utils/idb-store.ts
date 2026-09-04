@@ -12,6 +12,7 @@ type StableErrorCode =
   | 'DIRECTORY_PICKER_ABORTED'
   | 'DIRECTORY_PERMISSION_DENIED'
   | 'INDEXEDDB_UNAVAILABLE'
+  | 'USER_ACTIVATION_REQUIRED'
   | 'WORKSPACE_NOT_SELECTED'
   | 'WORKSPACE_STORAGE_FAILURE';
 
@@ -39,6 +40,10 @@ const databaseFactory = (): IDBFactory => {
 
 const directoryPicker = (): DirectoryPicker | undefined =>
   (globalThis as typeof globalThis & { showDirectoryPicker?: DirectoryPicker }).showDirectoryPicker;
+
+const hasActiveUserGesture = (): boolean =>
+  typeof navigator !== 'undefined'
+  && (navigator as Navigator & { userActivation?: { isActive?: boolean } }).userActivation?.isActive === true;
 
 const openDatabase = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   let request: IDBOpenDBRequest;
@@ -137,6 +142,7 @@ export class WorkspaceStore {
   }
 
   async requestReadWrite(): Promise<PermissionState> {
+    if (!hasActiveUserGesture()) throw stableError('USER_ACTIVATION_REQUIRED');
     const workspace = await this.load();
     if (workspace === null) throw stableError('WORKSPACE_NOT_SELECTED');
     try {

@@ -1,4 +1,10 @@
 /** Messages crossing Chrome runtime Ports are JSON values only. */
+import {
+  isValidNetworkMode,
+  isValidWorkspaceSession,
+  WorkspaceSessionAuthorizer,
+} from '../security/capabilities';
+
 export type WorkspaceCapability = 'read' | 'write' | 'delete';
 
 export type NetworkMode =
@@ -99,24 +105,9 @@ const portBytesAtMost = (value: unknown): boolean => {
   }
 };
 
-export const isNetworkMode = (value: unknown): value is NetworkMode => {
-  if (!isRecord(value)) return false;
-  if (value.mode === 'offline') return hasExactKeys(value, ['mode']);
-  return value.mode === 'wisp'
-    && hasExactKeys(value, ['mode', 'relayUrl'])
-    && typeof value.relayUrl === 'string'
-    && value.relayUrl.length > 0
-    && bytesAtMost(value.relayUrl, MAX_PORT_BYTES);
-};
+export const isNetworkMode = isValidNetworkMode;
 
-export const isWorkspaceSession = (value: unknown): value is WorkspaceSession =>
-  isRecord(value)
-  && hasExactKeys(value, ['mode', 'capabilities', 'network'])
-  && value.mode === 'workspace'
-  && Array.isArray(value.capabilities)
-  && value.capabilities.every((capability) => capability === 'read' || capability === 'write' || capability === 'delete')
-  && new Set(value.capabilities).size === value.capabilities.length
-  && isNetworkMode(value.network);
+export const isWorkspaceSession = isValidWorkspaceSession;
 
 export const isRiskConsent = (value: unknown): value is RiskConsent =>
   isRecord(value)
@@ -189,6 +180,14 @@ export const isVMRequest = (value: unknown): value is VMRequest => {
       return false;
   }
 };
+
+/** Task 5 Worker dispatch must use this guard after VM_INIT establishes session state. */
+export const isAuthorizedVMRequest = (
+  value: unknown,
+  authorizer: WorkspaceSessionAuthorizer,
+): value is VMRequest =>
+  isVMRequest(value)
+  && (value.kind !== 'VM_ATTACH_WORKSPACE' || authorizer.canAttachWorkspace());
 
 export const isVMEvent = (value: unknown): value is VMEvent => {
   if (!isRecord(value) || !isId(value.requestId)) return false;

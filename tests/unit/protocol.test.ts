@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  isAuthorizedVMRequest,
   isContentEvent,
   isSidePanelCommand,
   isVMEvent,
   isVMRequest,
 } from '../../src/types/protocol';
+import { WorkspaceSessionAuthorizer } from '../../src/security/capabilities';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -80,6 +82,40 @@ describe('Chrome Port protocol guards', () => {
       requestId: 'req-1',
       handle: new TestDirectoryHandle(),
     })).toBe(true);
+  });
+
+  it('authorizes workspace attachment only for an active workspace session', () => {
+    class TestDirectoryHandle {}
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    const authorizer = new WorkspaceSessionAuthorizer();
+    const attach = {
+      kind: 'VM_ATTACH_WORKSPACE',
+      requestId: 'req-1',
+      handle: new TestDirectoryHandle(),
+    };
+
+    expect(isAuthorizedVMRequest(attach, authorizer)).toBe(false);
+    authorizer.activate({ mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } });
+    expect(isAuthorizedVMRequest(attach, authorizer)).toBe(true);
+    authorizer.clear();
+    expect(isAuthorizedVMRequest(attach, authorizer)).toBe(false);
+  });
+
+  it.each([
+    'ws://relay.test.invalid/wisp',
+    'wss://user:pass@relay.test.invalid/wisp',
+    'wss://relay.test.invalid/wisp#fragment',
+    'https://relay.test.invalid/wisp',
+  ])('rejects a VM_INIT session with an unsafe WISP relay: %s', (relayUrl) => {
+    expect(isVMRequest({
+      kind: 'VM_INIT',
+      requestId: 'req-1',
+      session: {
+        mode: 'workspace',
+        capabilities: ['read'],
+        network: { mode: 'wisp', relayUrl },
+      },
+    })).toBe(false);
   });
 
   it('validates every VM event variant with exact keys and scalar bounds', () => {

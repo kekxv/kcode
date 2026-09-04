@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { canUseNetwork, parseSession } from '../../src/security/capabilities';
+import type { WorkspaceCapability } from '../../src/types/protocol';
+import { canUseNetwork, hasWorkspaceCapability, parseSession } from '../../src/security/capabilities';
 import { isSensitivePath } from '../../src/security/sensitive-paths';
 import { normalizeWorkspacePath } from '../../src/utils/path';
 
@@ -37,6 +38,16 @@ describe('workspace session parsing', () => {
       mode: 'workspace', capabilities: ['read'], network: { mode: 'wisp', relayUrl },
     })).toThrow('INVALID_RELAY_URL');
   });
+
+  it('copies and freezes capabilities so later input mutation cannot escalate access', () => {
+    const capabilities = ['read'];
+    const session = parseSession({ mode: 'workspace', capabilities, network: { mode: 'offline' } });
+
+    capabilities.push('write');
+
+    expect(hasWorkspaceCapability(session, 'write')).toBe(false);
+    expect(() => (session.capabilities as WorkspaceCapability[]).push('write')).toThrow(TypeError);
+  });
 });
 
 describe('sensitive workspace paths', () => {
@@ -56,5 +67,10 @@ describe('sensitive workspace paths', () => {
   it('case-folds and normalizes Unicode before checking protected names', () => {
     expect(isSensitivePath(normalizeWorkspacePath('.SSH/CONFIG'))).toBe(true);
     expect(isSensitivePath(normalizeWorkspacePath('CAFE\u0301.PEM'))).toBe(true);
+  });
+
+  it('matches compatibility-equivalent protected names such as long-s', () => {
+    expect(isSensitivePath(normalizeWorkspacePath('.ſsh/config'))).toBe(true);
+    expect(isSensitivePath(normalizeWorkspacePath('ｉｄ_ｒſa'))).toBe(true);
   });
 });

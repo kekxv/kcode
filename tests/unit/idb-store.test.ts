@@ -40,7 +40,7 @@ describe('WorkspaceStore', () => {
     expect(handle.requestPermission).not.toHaveBeenCalled();
   });
 
-  it('queries read permission without escalating and requests readwrite only explicitly', async () => {
+  it('queries read permission without escalating', async () => {
     const store = new WorkspaceStore();
     const handle = directoryHandle();
     await store.save(handle as unknown as FileSystemDirectoryHandle);
@@ -48,6 +48,23 @@ describe('WorkspaceStore', () => {
     await expect(store.getPermission()).resolves.toBe('prompt');
     expect(handle.queryPermission).toHaveBeenCalledWith({ mode: 'read' });
     expect(handle.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('rejects write permission requests without an active user gesture', async () => {
+    vi.stubGlobal('navigator', { userActivation: { isActive: false } });
+    const store = new WorkspaceStore();
+    const handle = directoryHandle();
+    await store.save(handle as unknown as FileSystemDirectoryHandle);
+
+    await expect(store.requestReadWrite()).rejects.toThrow('USER_ACTIVATION_REQUIRED');
+    expect(handle.requestPermission).not.toHaveBeenCalled();
+  });
+
+  it('requests readwrite permission while a user gesture is active', async () => {
+    vi.stubGlobal('navigator', { userActivation: { isActive: true } });
+    const store = new WorkspaceStore();
+    const handle = directoryHandle();
+    await store.save(handle as unknown as FileSystemDirectoryHandle);
 
     await expect(store.requestReadWrite()).resolves.toBe('granted');
     expect(handle.requestPermission).toHaveBeenCalledWith({ mode: 'readwrite' });
