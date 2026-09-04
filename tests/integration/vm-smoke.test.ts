@@ -16,6 +16,7 @@ const execFile = promisify(execFileCallback);
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const standardRootfsLimit = 60 * 1024 * 1024;
+const initramfsWireLimit = 64 * 1024 * 1024;
 
 class FakeV86 {
   static latest: FakeV86 | undefined;
@@ -174,6 +175,74 @@ describe('two-stage Alpine boot assets', () => {
       })).rejects.toMatchObject({ stderr: expect.stringContaining('kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit') });
     } finally {
       await fs.rm(fixture, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('rejects an initramfs larger than v86\'s 64 MiB on-wire window', async () => {
+    // Break caught: allowing an oversized compressed initrd lets v86 fail before the embedded loader can run.
+    const fixture = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-assets-'));
+    try {
+      const assets = join(fixture, 'assets');
+      await fs.mkdir(assets);
+      const source = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
+      const assetNames = Object.keys(source.assets);
+      await Promise.all(assetNames.map((name) => fs.copyFile(join(root, 'public/v86', name), join(assets, name))));
+      await fs.truncate(join(assets, 'kcode-initramfs'), initramfsWireLimit + 1);
+      source.assets = Object.fromEntries(await Promise.all(assetNames.map(async (name) => [
+        name,
+        sha256(await fs.readFile(join(assets, name))),
+      ])));
+      source.snapshot.assetSetSha256 = sha256(Buffer.from(JSON.stringify(Object.fromEntries(
+        assetNames.filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, source.assets[name]]),
+      ))));
+      await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
+
+      await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
+        cwd: root,
+        env: { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets },
+      })).rejects.toMatchObject({ stderr: expect.stringContaining('kcode-initramfs exceeds the v86 64 MiB on-wire limit') });
+    } finally {
+      await fs.rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an initramfs whose embedded root image differs from the manifest-bound loose asset', async () => {
+    // Break caught: accepting a separately hashed root image that is not the bytes embedded in /kcode-initramfs defeats boot-time asset verification.
+    const fixture = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-assets-'));
+    try {
+      const assets = join(fixture, 'assets');
+      await fs.mkdir(assets);
+      const source = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
+      const assetNames = Object.keys(source.assets);
+      await Promise.all(assetNames.map((name) => fs.copyFile(join(root, 'public/v86', name), join(assets, name))));
+      await fs.writeFile(join(assets, 'kcode-rootfs.sqfs'), 'different root image');
+      source.assets = Object.fromEntries(await Promise.all(assetNames.map(async (name) => [
+        name,
+        sha256(await fs.readFile(join(assets, name))),
+      ])));
+      source.snapshot.assetSetSha256 = sha256(Buffer.from(JSON.stringify(Object.fromEntries(
+        assetNames.filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, source.assets[name]]),
+      ))));
+      await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
+
+      await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
+        cwd: root,
+        env: { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets },
+      })).rejects.toMatchObject({ stderr: expect.stringContaining('embedded /kcode-rootfs.sqfs SHA-256 differs') });
+    } finally {
+      await fs.rm(fixture, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('rejects a protected marker in a rootfs symlink target', async () => {
+    // Break caught: scanning only file bytes permits a protected path to survive packaging through a symlink target.
+    const rootfs = await fs.mkdtemp(join(tmpdir(), 'kcode-rootfs-marker-'));
+    try {
+      await fs.symlink('.env', join(rootfs, 'escaped-marker'));
+      await expect(execFile('node', ['scripts/scan-vm-image.mjs', rootfs], { cwd: root }))
+        .rejects.toMatchObject({ stderr: expect.stringContaining('rootfs symlink target contains protected marker: /.env') });
+    } finally {
+      await fs.rm(rootfs, { recursive: true, force: true });
     }
   });
 

@@ -43,6 +43,7 @@ const address = server.address();
 if (!address || typeof address === 'string') throw new Error('failed to start local snapshot server');
 
 let browser;
+let temporary = '';
 try {
   browser = await chromium.launch();
   const origin = `http://127.0.0.1:${address.port}`;
@@ -126,9 +127,10 @@ try {
     const markerOffset = Buffer.from(raw).indexOf(Buffer.from(marker));
     if (markerOffset >= 0) throw new Error(`snapshot contains protected marker: ${marker} at byte ${markerOffset}`);
   }
-  const temporary = `${snapshotPath}.tmp-${process.pid}`;
+  temporary = `${snapshotPath}.tmp-${process.pid}`;
   await fs.writeFile(temporary, zstdCompressSync(raw));
   await fs.rename(temporary, snapshotPath);
+  temporary = '';
   manifest.assets['alpine-state.bin.zst'] = hash(await fs.readFile(snapshotPath));
   manifest.snapshot.v86Version = manifest.v86.packageVersion;
   manifest.snapshot.assetSetSha256 = hash(Buffer.from(JSON.stringify(
@@ -136,6 +138,7 @@ try {
   )));
   await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 } finally {
+  if (temporary) await fs.rm(temporary, { force: true }).catch(() => {});
   await browser?.close();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }

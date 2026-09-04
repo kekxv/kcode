@@ -45,3 +45,34 @@ The packaged smoke test is headed because Chrome extension loading requires it.
 The initial run had no X server; rerunning with the available local Xvfb on
 `DISPLAY=:99` passed. Generated kernel/initramfs/root/snapshot binaries remain
 ignored.
+
+## Review amendments (2026-09-04)
+
+- The Docker image now pins `xz=5.8.3-r0`; deterministic newc cpio creation
+  and XZ compression run only in that locked i386 container, never through
+  host `cpio` or `xz`.
+- The verifier now uses the same container to decompress/extract
+  `kcode-initramfs` and fails closed unless its embedded
+  `/kcode-rootfs.sqfs` SHA-256 equals both the loose root asset and manifest.
+- Both construction and verification reject an initramfs larger than v86's
+  64 MiB on-wire window. The builder scans rootfs symlink targets and scans
+  the extracted final SquashFS before publishing it.
+- Snapshot temporary output is removed in `finally`, including failed writes
+  and failed renames.
+
+### Amendment TDD and verification evidence
+
+- RED: `npm run test:run -- tests/integration/vm-smoke.test.ts` produced the
+  expected failures for an oversized initramfs, an embedded-root mismatch,
+  and a protected symlink target.
+- GREEN: the focused suite passed `10 passed, 1 skipped`; the real packaged
+  256 MiB smoke then passed `11 passed`, including `KCODE_SMOKE`.
+- Fresh checks: `./scripts/build-alpine-guest.sh` rebuilt a 37.55 MiB
+  SquashFS and 38.7 MiB initramfs; `node scripts/build-v86-snapshot.mjs`,
+  `npm run assets:verify`, `npm run typecheck`, and `npm run test:run` all
+  passed (`118 passed, 1 skipped`).
+
+### Scope note
+
+The user requires future workspace-only work to use `/work`. This amendment
+does not implement Task 7 or make any workspace mount changes.

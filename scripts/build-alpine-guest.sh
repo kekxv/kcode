@@ -6,13 +6,14 @@ image='kcode-alpine-i386:locked'
 container=''
 staging=$(mktemp -d "$root/.build-alpine-guest.XXXXXX")
 rootfs_limit=$((60 * 1024 * 1024))
+initramfs_wire_limit=$((64 * 1024 * 1024))
 cleanup() {
   [[ -n "$container" ]] && docker rm -f "$container" >/dev/null 2>&1 || true
   rm -rf "$staging"
 }
 trap cleanup EXIT
 
-for command in docker cpio sha256sum node tar xz; do command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 1; }; done
+for command in docker sha256sum node tar; do command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 1; }; done
 
 docker build --platform linux/386 --pull=false --tag "$image" --file "$root/vm/alpine/Dockerfile" "$root"
 container=$(docker create "$image")
@@ -33,25 +34,7 @@ rm -rf "$staging/rootfs/dev"/*
 rm -f "$staging/rootfs/usr/sbin/setup-alpine" "$staging/rootfs/usr/sbin/setup-sshd" "$staging/rootfs/etc/init.d/firstboot"
 find "$staging/rootfs" -xdev \( -name '*.log' -o -name 'build.log' \) -type f -delete
 
-node --input-type=module - "$staging/rootfs" <<'NODE'
-import { readdir, readFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
-const [rootfs] = process.argv.slice(2);
-const markers = ['KCODE_PROTECTED_PATH_TEST_MARKER', 'KCODE_SECRET_TEST_MARKER', 'BEGIN OPENSSH PRIVATE KEY', '/.ssh/', '/.env'];
-const visit = async (directory) => {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    const imagePath = `/${relative(rootfs, path)}`;
-    if (imagePath.includes('/.ssh/') || imagePath.endsWith('/.ssh') || imagePath.endsWith('/.env')) throw new Error(`rootfs contains protected path: ${imagePath}`);
-    if (entry.isDirectory()) await visit(path);
-    else if (entry.isFile()) {
-      const bytes = await readFile(path);
-      for (const marker of markers) if (bytes.includes(Buffer.from(marker))) throw new Error(`rootfs contains protected marker: ${marker}`);
-    }
-  }
-};
-await visit(rootfs);
-NODE
+node "$root/scripts/scan-vm-image.mjs" "$staging/rootfs"
 
 kernel_version=$(find "$staging/rootfs/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)
 if [[ $(printf '%s\n' "$kernel_version" | sed '/^$/d' | wc -l) -ne 1 ]]; then
@@ -83,6 +66,7 @@ done ) > "$staging/rootfs.sort"
 docker run --rm --platform linux/386 --mount "type=bind,src=$staging/rootfs,dst=/input,readonly" --mount "type=bind,src=$staging/output,dst=/output" --mount "type=bind,src=$staging/rootfs.sort,dst=/input.sort,readonly" "$image" mksquashfs /input /output/kcode-rootfs.sqfs -noappend -no-progress -processors 1 -comp xz -b 1048576 -Xdict-size 1048576 -no-xattrs -all-root -mkfs-time 0 -all-time 0 -sort /input.sort
 test -s "$staging/output/kcode-rootfs.sqfs"
 if [[ $(stat -c '%s' "$staging/output/kcode-rootfs.sqfs") -gt $rootfs_limit ]]; then echo "kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit of $rootfs_limit bytes" >&2; exit 1; fi
+docker run --rm --platform linux/386 --mount "type=bind,src=$staging/output,dst=/input,readonly" --mount "type=bind,src=$root/scripts,dst=/scripts,readonly" "$image" sh -ec 'unsquashfs -no-progress -d /verified /input/kcode-rootfs.sqfs >/dev/null && node /scripts/scan-vm-image.mjs /verified'
 cp "$staging/output/kcode-rootfs.sqfs" "$root/public/v86/kcode-rootfs.sqfs"
 
 mkdir -p "$staging/loader/bin" "$staging/loader/lib" "$staging/loader/dev" "$staging/loader/proc" "$staging/loader/sys" "$staging/loader/newroot"
@@ -108,7 +92,10 @@ exec switch_root /newroot /sbin/init
 EOF
 chmod 0755 "$staging/loader/init"
 ( cd "$staging/loader" && find . -xdev -print0 | LC_ALL=C sort -z | xargs -0 touch -h -d '@0' )
-( cd "$staging/loader" && find . -xdev -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --owner 0:0 --reproducible | xz --threads=1 --check=crc32 -9e ) > "$root/public/v86/kcode-initramfs"
+docker run --rm --platform linux/386 --mount "type=bind,src=$staging/loader,dst=/input,readonly" --mount "type=bind,src=$staging/output,dst=/output" "$image" sh -ec 'cd /input && find . -xdev -print0 | LC_ALL=C sort -z | cpio -0 -o -H newc -R 0:0 --ignore-devno --renumber-inodes | xz --threads=1 --check=crc32 -9e > /output/kcode-initramfs'
+test -s "$staging/output/kcode-initramfs"
+if [[ $(stat -c '%s' "$staging/output/kcode-initramfs") -gt $initramfs_wire_limit ]]; then echo "kcode-initramfs exceeds the v86 64 MiB on-wire limit of $initramfs_wire_limit bytes" >&2; exit 1; fi
+cp "$staging/output/kcode-initramfs" "$root/public/v86/kcode-initramfs"
 
 node --input-type=module - "$root/public/v86/asset-manifest.json" "$root/vm/alpine/apk.lock" <<'NODE'
 import { createHash } from 'node:crypto';

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { execFile as execFileCallback } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -12,11 +14,43 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const digest = /^[a-f0-9]{64}$/;
 const expectedNames = new Set(['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs', 'alpine-state.bin.zst']);
 const standardRootfsLimit = 60 * 1024 * 1024;
+const initramfsWireLimit = 64 * 1024 * 1024;
+const toolchainImage = 'kcode-alpine-i386:locked';
 const permittedMetadata = new Set(['README.md', 'asset-manifest.json']);
 const errors = [];
+const execFile = promisify(execFileCallback);
 
 const fail = (message) => errors.push(message);
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+let toolchainReady;
+const ensureToolchain = async () => {
+  toolchainReady ??= execFile('docker', [
+    'build', '--platform', 'linux/386', '--pull=false', '--tag', toolchainImage,
+    '--file', join(root, 'vm', 'alpine', 'Dockerfile'), root,
+  ]);
+  await toolchainReady;
+};
+
+const embeddedRootfsSha256 = async (initramfsPath) => {
+  const staging = await mkdtemp(join(root, '.verify-initramfs-'));
+  const extraction = join(staging, 'output');
+  try {
+    await mkdir(extraction);
+    await copyFile(initramfsPath, join(staging, 'kcode-initramfs'));
+    await ensureToolchain();
+    await execFile('docker', [
+      'run', '--rm', '--platform', 'linux/386',
+      '--mount', `type=bind,src=${staging},dst=/input,readonly`,
+      '--mount', `type=bind,src=${extraction},dst=/output`,
+      toolchainImage,
+      'sh', '-ec', 'cd /output && xz -dc /input/kcode-initramfs | cpio -idm',
+    ]);
+    return sha256(await readFile(join(extraction, 'kcode-rootfs.sqfs')));
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+};
 
 let manifest;
 try {
@@ -55,6 +89,9 @@ if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v8
   if (listedNames.length !== expectedNames.size || listedNames.some((name) => !expectedNames.has(name))) {
     fail('manifest asset list is incomplete or contains an unexpected asset');
   }
+  let looseRootfsSha256 = '';
+  let rootfsCanBeCompared = true;
+  let initramfsCanBeInspected = true;
   for (const name of expectedNames) {
     const expectedDigest = manifest.assets[name];
     if (!digest.test(expectedDigest ?? '')) {
@@ -66,11 +103,31 @@ if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v8
       if (!details.isFile()) throw new Error('not a regular file');
       if (name === 'kcode-rootfs.sqfs' && details.size > standardRootfsLimit) {
         fail(`kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit (${details.size} bytes > ${standardRootfsLimit} bytes)`);
+        rootfsCanBeCompared = false;
+      }
+      if (name === 'kcode-initramfs' && details.size > initramfsWireLimit) {
+        fail(`kcode-initramfs exceeds the v86 64 MiB on-wire limit (${details.size} bytes > ${initramfsWireLimit} bytes)`);
+        initramfsCanBeInspected = false;
       }
       const actual = sha256(await readFile(join(assetsDirectory, name)));
       if (actual !== expectedDigest) fail(`${name}: SHA-256 mismatch (${actual})`);
+      if (name === 'kcode-rootfs.sqfs') looseRootfsSha256 = actual;
+      if (name === 'kcode-rootfs.sqfs' && actual !== expectedDigest) rootfsCanBeCompared = false;
+      if (name === 'kcode-initramfs' && actual !== expectedDigest) initramfsCanBeInspected = false;
     } catch {
       fail(`${name}: missing`);
+      if (name === 'kcode-initramfs') initramfsCanBeInspected = false;
+      if (name === 'kcode-rootfs.sqfs') rootfsCanBeCompared = false;
+    }
+  }
+  if (initramfsCanBeInspected && rootfsCanBeCompared && looseRootfsSha256) {
+    try {
+      const embeddedSha256 = await embeddedRootfsSha256(join(assetsDirectory, 'kcode-initramfs'));
+      if (embeddedSha256 !== looseRootfsSha256 || embeddedSha256 !== manifest.assets['kcode-rootfs.sqfs']) {
+        fail('embedded /kcode-rootfs.sqfs SHA-256 differs from the loose asset or manifest');
+      }
+    } catch (error) {
+      fail(`cannot extract embedded /kcode-rootfs.sqfs (${error instanceof Error ? error.message : String(error)})`);
     }
   }
   const assetSet = sha256(Buffer.from(JSON.stringify(
