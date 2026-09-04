@@ -123,7 +123,7 @@ export class PortRouter {
     try {
       tab = await this.dependencies.tabs.get(sourceTabId);
     } catch {
-      this.failRequest(message.requestId, pending);
+      if (this.pending.get(message.requestId) === pending) this.failRequest(message.requestId, pending);
       return;
     }
     if (

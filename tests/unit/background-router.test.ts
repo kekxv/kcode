@@ -129,6 +129,38 @@ describe('PortRouter', () => {
     }));
   });
 
+  it('does not report identity loss twice when a replaced content port lookup rejects', async () => {
+    let rejectResponseLookup!: (reason?: unknown) => void;
+    const responseLookup = new Promise<{ id: number; url: string }>((_resolve, reject) => { rejectResponseLookup = reject; });
+    const sidePanel = makePort('kcode-sidepanel');
+    const content17 = makePort('kcode-content', 17);
+    const replacement = makePort('kcode-content', 17);
+    const router = new PortRouter({
+      tabs: {
+        get: vi.fn()
+          .mockResolvedValueOnce({ id: 17, url: 'https://chat.deepseek.com/' })
+          .mockReturnValueOnce(responseLookup),
+      },
+    });
+    router.setSidePanelPort(sidePanel as never);
+    router.setContentPort(content17 as never);
+    await router.fromSidePanel({
+      protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'req-1', targetTabId: 17, prompt: 'hello',
+    });
+
+    const response = router.fromContent(content17 as never, {
+      protocolVersion: 1, kind: 'CONTENT_RESPONSE_DONE', requestId: 'req-1',
+    });
+    router.setContentPort(replacement as never);
+    rejectResponseLookup(new Error('tab gone'));
+    await response;
+
+    const identityLosses = sidePanel.postMessage.mock.calls.filter(([event]) =>
+      (event as { code?: string }).code === 'TAB_IDENTITY_LOST',
+    );
+    expect(identityLosses).toHaveLength(1);
+  });
+
   it('settles a request before a disconnected Port rejects a notification', async () => {
     const sidePanel = makePort('kcode-sidepanel');
     const content17 = makePort('kcode-content', 17);
