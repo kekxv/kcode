@@ -40,3 +40,24 @@ fail-closed verifier correctly remains non-zero for those missing artifacts.
 The BIOS and wasm were synchronized and verified but remain ignored, as
 required. Run the documented build chain on a host where the i386 Docker build
 completes to produce and verify the release-only assets.
+
+## Review repair
+
+- `V86Runtime.boot` now waits up to 30 seconds for both `emulator-loaded` and
+  a `KCODE_GUEST_READY` serial marker before the Worker emits `VM_READY`. A
+  static serial probe makes the readiness proof available after restoring a
+  snapshot, where the original marker predates the saved state.
+- The Worker forwards runtime serial chunks as request-correlated
+  `VM_OUTPUT_DELTA` events; VM event validation allows the runtime's 64 KiB
+  maximum, while Chrome Port content deltas retain their stricter 32 KiB cap.
+- The gated smoke test now serves and boots generated packaged assets in
+  Chromium, asserts 128 MiB/no network configuration, waits for ready no more
+  than 30 seconds, sends `echo KCODE_SMOKE`, and observes the serial marker.
+- Snapshot creation freezes JavaScript time/random sources and rejects any
+  byte difference from a previous verified uncompressed state. APK lock drift
+  now always fails; no environment variable can overwrite the reviewed lock.
+
+Repair verification: focused runtime/protocol tests passed (13 passed, 1
+gated skip); full suite, typecheck, and Vite build passed (88 passed, 1 gated
+skip). `assets:verify` remains correctly blocked only by the three absent
+generated guest/snapshot artifacts and their derived manifest digest.

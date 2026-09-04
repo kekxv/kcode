@@ -126,4 +126,10 @@ describe('Chrome Port protocol guards', () => {
     expect(isVMEvent({ kind: 'VM_ERROR', requestId: 'req-1', code: 'bad code', message: 'failed' })).toBe(false);
     expect(isVMEvent({ kind: 'VM_READY', requestId: 'req-1', extra: true })).toBe(false);
   });
+
+  it('allows Worker serial deltas through the 64 KiB runtime boundary only', () => {
+    // Break caught: dropping a legal runtime batch prevents VMClient from streaming boot output.
+    expect(isVMEvent({ kind: 'VM_OUTPUT_DELTA', requestId: 'req-1', delta: 'a'.repeat(64 * 1024) })).toBe(true);
+    expect(isVMEvent({ kind: 'VM_OUTPUT_DELTA', requestId: 'req-1', delta: 'a'.repeat(64 * 1024 + 1) })).toBe(false);
+  });
 });

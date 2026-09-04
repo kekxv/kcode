@@ -4,7 +4,7 @@ import { createReadStream, promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { zstdCompressSync } from 'node:zlib';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { chromium } from 'playwright';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,11 +49,16 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   await page.goto(`${origin}/snapshot.html`);
   const state = await page.evaluate(async ({ base, memory }) => {
+    // v86 consults host time/randomness while constructing a machine. Freeze
+    // the JavaScript sources it can observe, then reject any byte drift below.
+    Date.now = () => 0;
+    Math.random = () => 0.5;
     const { V86 } = await import('/libv86.mjs');
     const vm = new V86({
       wasm_path: `${base}/v86/v86.wasm`, bios: { url: `${base}/v86/seabios.bin` },
       vga_bios: { url: `${base}/v86/vgabios.bin` }, bzimage: { url: `${base}/v86/vmlinuz-virt` },
-      initrd: { url: `${base}/v86/kcode-initramfs` }, memory_size: memory, autostart: true, filesystem: {},
+      initrd: { url: `${base}/v86/kcode-initramfs` }, cmdline: 'console=ttyS0',
+      memory_size: memory, autostart: true, filesystem: {},
     });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('KCODE_GUEST_READY timeout')), 30_000);
@@ -76,6 +81,12 @@ try {
   const raw = Uint8Array.from(state);
   for (const marker of protectedMarkers) {
     if (Buffer.from(raw).includes(Buffer.from(marker))) throw new Error(`snapshot contains protected marker: ${marker}`);
+  }
+  try {
+    const existing = zstdDecompressSync(await fs.readFile(snapshotPath));
+    if (!existing.equals(raw)) throw new Error('snapshot bytes differ from the prior verified build');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
   }
   const temporary = `${snapshotPath}.tmp-${process.pid}`;
   await fs.writeFile(temporary, zstdCompressSync(raw));

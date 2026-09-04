@@ -25,6 +25,7 @@ async function dispatch(value: unknown): Promise<void> {
   const { requestId } = value;
   if (value.kind === 'VM_INIT') {
     destroyRuntime();
+    activeRequestId = requestId;
     try {
       const session = authorizer.activate(value.session);
       runtime = new V86Runtime({
@@ -35,9 +36,14 @@ async function dispatch(value: unknown): Promise<void> {
           self.close();
         },
       });
+      runtime.onSerial((delta) => {
+        const serialRequestId = activeRequestId;
+        if (serialRequestId) send({ kind: 'VM_OUTPUT_DELTA', requestId: serialRequestId, delta });
+      });
       // The snapshot topology is valid only while networking remains offline.
       await runtime.boot({ useSnapshot: session.network.mode === 'offline' });
       send({ kind: 'VM_READY', requestId });
+      activeRequestId = null;
     } catch {
       destroyRuntime();
       fail(requestId, 'VM_BOOT_FAILED', 'The verified Linux runtime could not boot.');

@@ -3,6 +3,7 @@ import { V86, type V86Options } from 'v86';
 export const VM_MEMORY_BYTES = 128 * 1024 * 1024;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
 export const MAX_COMMAND_SERIAL_BYTES = 8 * 1024 * 1024;
+export const VM_BOOT_TIMEOUT_MS = 30_000;
 
 type V86Emulator = Pick<V86, 'add_listener' | 'serial0_send' | 'destroy'>;
 type V86Constructor = new (options: V86Options) => V86Emulator;
@@ -17,6 +18,7 @@ type V86RuntimeDependencies = {
   V86?: V86Constructor;
   assetUrl?: AssetUrlResolver;
   onOutputLimit?: () => void;
+  readyTimeoutMs?: number;
 };
 
 const extensionAssetUrl: AssetUrlResolver = (name) => chrome.runtime.getURL(`v86/${name}`);
@@ -26,6 +28,7 @@ export class V86Runtime {
   private readonly V86: V86Constructor;
   private readonly assetUrl: AssetUrlResolver;
   private readonly onOutputLimit?: () => void;
+  private readonly readyTimeoutMs: number;
   private emulator: V86Emulator | null = null;
   private readonly serialListeners = new Set<(delta: string) => void>();
   private readonly decoder = new TextDecoder();
@@ -33,15 +36,19 @@ export class V86Runtime {
   private totalSerialBytes = 0;
   private flushQueued = false;
   private destroyed = false;
+  private bootSerialTail = '';
+  private bootReady: { loaded: boolean; guestReady: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(dependencies: V86RuntimeDependencies = {}) {
     this.V86 = dependencies.V86 ?? V86;
     this.assetUrl = dependencies.assetUrl ?? extensionAssetUrl;
     this.onOutputLimit = dependencies.onOutputLimit;
+    this.readyTimeoutMs = dependencies.readyTimeoutMs ?? VM_BOOT_TIMEOUT_MS;
   }
 
   async boot(config: V86RuntimeBootConfig = {}): Promise<void> {
     if (this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_BOOTABLE');
+    const ready = this.waitForReady();
     const options: V86Options = {
       wasm_path: this.assetUrl('v86.wasm'),
       bios: { url: this.assetUrl('seabios.bin') },
@@ -50,13 +57,29 @@ export class V86Runtime {
       initrd: { url: this.assetUrl('kcode-initramfs') },
       memory_size: VM_MEMORY_BYTES,
       autostart: true,
+      cmdline: 'console=ttyS0',
       // Preserve the single virtio-9P device for the authorized Task 7 backend.
       filesystem: {},
     };
     if (config.useSnapshot !== false) options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
-    const emulator = new this.V86(options);
-    this.emulator = emulator;
-    emulator.add_listener('serial0-output-byte', (byte) => this.receiveSerialByte(byte));
+    try {
+      const emulator = new this.V86(options);
+      this.emulator = emulator;
+      emulator.add_listener('emulator-loaded', () => {
+        if (this.bootReady) {
+          this.bootReady.loaded = true;
+          // A restored snapshot resumes after its original ready marker. This
+          // command is consumed only once the serial shell is responsive, so
+          // it supplies the same readiness proof for cold and snapshot boots.
+          this.serialSend("printf 'KCODE_GUEST_READY\\n' >/dev/ttyS0\n");
+          this.finishBootIfReady();
+        }
+      });
+      emulator.add_listener('serial0-output-byte', (byte) => this.receiveSerialByte(byte));
+    } catch (error) {
+      this.failBoot(error instanceof Error ? error : new Error('VM_BOOT_FAILED'));
+    }
+    await ready;
   }
 
   /** Task 7 replaces the empty built-in 9P backend before issuing a mount. */
@@ -77,6 +100,7 @@ export class V86Runtime {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.failBoot(new Error('VM_RUNTIME_DESTROYED'));
     this.flushSerial();
     this.serialListeners.clear();
     this.emulator?.destroy();
@@ -109,6 +133,35 @@ export class V86Runtime {
     this.serialBytes = [];
     const delta = this.decoder.decode(bytes, { stream: true });
     if (delta.length === 0) return;
+    if (this.bootReady) {
+      this.bootSerialTail = `${this.bootSerialTail}${delta}`.slice(-64);
+      this.bootReady.guestReady ||= this.bootSerialTail.includes('KCODE_GUEST_READY');
+      this.finishBootIfReady();
+    }
     for (const listener of this.serialListeners) listener(delta);
+  }
+
+  private waitForReady(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => this.failBoot(new Error('VM_BOOT_TIMEOUT')), this.readyTimeoutMs);
+      this.bootSerialTail = '';
+      this.bootReady = { loaded: false, guestReady: false, resolve, reject, timer };
+    });
+  }
+
+  private finishBootIfReady(): void {
+    const ready = this.bootReady;
+    if (!ready || !ready.loaded || !ready.guestReady) return;
+    clearTimeout(ready.timer);
+    this.bootReady = null;
+    ready.resolve();
+  }
+
+  private failBoot(error: Error): void {
+    const ready = this.bootReady;
+    if (!ready) return;
+    clearTimeout(ready.timer);
+    this.bootReady = null;
+    ready.reject(error);
   }
 }

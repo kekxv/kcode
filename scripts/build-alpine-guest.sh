@@ -17,13 +17,9 @@ docker build --platform linux/386 --pull=false --tag "$image" --file "$root/vm/a
 container=$(docker create "$image")
 docker cp "$container:/usr/local/share/kcode/apk.lock" "$staging/apk.lock"
 if ! cmp -s "$root/vm/alpine/apk.lock" "$staging/apk.lock"; then
-  if [[ "${KCODE_UPDATE_APK_LOCK:-}" == '1' ]]; then
-    install -m 0644 "$staging/apk.lock" "$root/vm/alpine/apk.lock"
-  else
   echo 'APK lock drift detected; inspect the pinned image/package repository before updating vm/alpine/apk.lock.' >&2
   diff -u "$root/vm/alpine/apk.lock" "$staging/apk.lock" >&2 || true
   exit 1
-  fi
 fi
 
 mkdir "$staging/rootfs"

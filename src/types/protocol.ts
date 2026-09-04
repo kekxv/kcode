@@ -79,6 +79,7 @@ export type VMEvent =
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_PORT_BYTES = 384 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
+const MAX_VM_SERIAL_DELTA_BYTES = 64 * 1024;
 const encoder = new TextEncoder();
 
 type RecordValue = Record<string, unknown>;
@@ -224,7 +225,7 @@ export const isVMEvent = (value: unknown): value is VMEvent => {
     case 'VM_READY':
       return hasExactKeys(value, ['kind', 'requestId']);
     case 'VM_OUTPUT_DELTA':
-      return hasExactKeys(value, ['kind', 'requestId', 'delta']) && bytesAtMost(value.delta, MAX_DELTA_BYTES);
+      return hasExactKeys(value, ['kind', 'requestId', 'delta']) && bytesAtMost(value.delta, MAX_VM_SERIAL_DELTA_BYTES);
     case 'VM_RESULT':
       return hasExactKeys(value, ['kind', 'requestId', 'output', 'exitCode'])
         && bytesAtMost(value.output, MAX_PORT_BYTES)
