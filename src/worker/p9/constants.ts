@@ -1,5 +1,7 @@
 export const MAX_FRAME_BYTES = 1_048_576;
 export const MAX_MSIZE = MAX_FRAME_BYTES;
+/** Linux 9P rejects transport sizes below this protocol minimum. */
+export const P9_MIN_MSIZE = 256;
 export const MAX_PATH_COMPONENT_BYTES = 255;
 export const MAX_PATH_DEPTH = 64;
 export const P9_HEADER_BYTES = 7;

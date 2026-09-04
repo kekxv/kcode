@@ -1,7 +1,7 @@
-import { ERRNO, MAX_FRAME_BYTES, MAX_MSIZE, MAX_PATH_COMPONENT_BYTES, MAX_PATH_DEPTH, MESSAGE, P9_HEADER_BYTES } from './constants';
+import { ERRNO, MAX_FRAME_BYTES, MAX_MSIZE, MAX_PATH_COMPONENT_BYTES, MAX_PATH_DEPTH, MESSAGE, P9_HEADER_BYTES, P9_MIN_MSIZE } from './constants';
 import type { P9Request, P9Response, Qid, Tunknown } from './types';
 
-export { ERRNO, MAX_FRAME_BYTES, MAX_MSIZE, MAX_PATH_COMPONENT_BYTES, MAX_PATH_DEPTH } from './constants';
+export { ERRNO, MAX_FRAME_BYTES, MAX_MSIZE, MAX_PATH_COMPONENT_BYTES, MAX_PATH_DEPTH, P9_MIN_MSIZE } from './constants';
 export type { P9Request, P9Response, Qid } from './types';
 
 const MAX_U64 = (1n << 64n) - 1n;
@@ -25,7 +25,7 @@ const boundedInteger = (value: number, maximum: number, name: string): void => {
 
 /** Converts protocol values only at the browser API boundary. */
 export const toSafeBrowserNumber = (value: bigint): number => {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) fail('64-bit value exceeds browser-safe range.');
+  if (typeof value !== 'bigint' || value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) fail('64-bit value exceeds browser-safe range.');
   return Number(value);
 };
 
@@ -90,7 +90,7 @@ export class Writer {
   u16(value: number): this { boundedInteger(value, 0xffff, 'u16'); const bytes = new Uint8Array(2); new DataView(bytes.buffer).setUint16(0, value, true); return this.push(bytes); }
   u32(value: number): this { boundedInteger(value, 0xffff_ffff, 'u32'); const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, value, true); return this.push(bytes); }
   u64(value: bigint): this {
-    if (value < 0n || value > MAX_U64) fail('Invalid u64.');
+    if (typeof value !== 'bigint' || value < 0n || value > MAX_U64) fail('Invalid u64.');
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, value, true);
     return this.push(bytes);
@@ -105,7 +105,10 @@ export class Writer {
     if (bytes.byteLength > 0xffff) fail('Response string exceeds 16-bit length.');
     return this.u16(bytes.byteLength).bytes(bytes);
   }
-  qid(value: Qid): this { return this.u8(value.type).u32(value.version).u64(value.path); }
+  qid(value: Qid): this {
+    if (!value || typeof value !== 'object') fail('Invalid QID.');
+    return this.u8(value.type).u32(value.version).u64(value.path);
+  }
 
   finish(): Uint8Array {
     const output = new Uint8Array(this.length);
@@ -133,21 +136,22 @@ const path = (value: string): string => {
   return value;
 };
 const validMsize = (msize: number): number => {
-  if (msize < P9_HEADER_BYTES || msize > MAX_MSIZE) fail('Invalid negotiated msize.');
+  boundedInteger(msize, MAX_MSIZE, 'msize');
+  if (msize < P9_MIN_MSIZE) fail('Invalid negotiated msize.');
   return msize;
 };
 
-const checkedFrame = (frame: Uint8Array): { reader: Reader; type: number; tag: number } => {
+const checkedFrame = (frame: Uint8Array, maximum: number): { reader: Reader; type: number; tag: number } => {
   if (!(frame instanceof Uint8Array)) fail('Frame must be a Uint8Array.');
-  if (frame.byteLength < P9_HEADER_BYTES || frame.byteLength > MAX_FRAME_BYTES) fail('Invalid frame length.');
+  if (frame.byteLength < P9_HEADER_BYTES || frame.byteLength > maximum) fail('Invalid frame length.');
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const declared = view.getUint32(0, true);
-  if (declared !== frame.byteLength || declared < P9_HEADER_BYTES || declared > MAX_FRAME_BYTES) fail('Declared frame length does not match packet.');
+  if (declared !== frame.byteLength || declared < P9_HEADER_BYTES || declared > maximum) fail('Declared frame length does not match packet.');
   return { reader: new Reader(frame, P9_HEADER_BYTES), type: view.getUint8(4), tag: view.getUint16(5, true) };
 };
 
-export const decodeRequest = (frame: Uint8Array): P9Request => {
-  const { reader, type, tag } = checkedFrame(frame);
+const decodeRequestWithin = (frame: Uint8Array, maximum: number): P9Request => {
+  const { reader, type, tag } = checkedFrame(frame, maximum);
   let request: P9Request;
   switch (type) {
     case MESSAGE.Tversion: request = { type: 'Tversion', tag, msize: validMsize(reader.u32()), version: reader.string() }; break;
@@ -183,33 +187,96 @@ export const decodeRequest = (frame: Uint8Array): P9Request => {
   return request;
 };
 
+/** Decodes a standalone frame with the global 9P transport limit. */
+export const decodeRequest = (frame: Uint8Array): P9Request => decodeRequestWithin(frame, MAX_FRAME_BYTES);
+
 export const unknownRequestResponse = (request: Pick<Tunknown, 'tag'>): P9Response => ({
   type: 'Rlerror', tag: request.tag, errno: ERRNO.ENOSYS,
 });
 
-export const encodeResponse = (response: P9Response): Uint8Array => {
+const responseBytes = (value: unknown): Uint8Array => {
+  if (!(value instanceof Uint8Array)) fail('Response data must be a Uint8Array.');
+  return value as Uint8Array;
+};
+
+const encodeResponseWithin = (response: P9Response, maximum: number): Uint8Array => {
+  if (!response || typeof response !== 'object' || typeof response.type !== 'string') fail('Invalid response.');
+  if (maximum < P9_HEADER_BYTES || maximum > MAX_FRAME_BYTES) fail('Invalid response frame limit.');
   boundedInteger(response.tag, 0xffff, 'tag');
-  const body = new Writer(MAX_FRAME_BYTES - P9_HEADER_BYTES);
+  const body = new Writer(maximum - P9_HEADER_BYTES);
   let type: number;
   switch (response.type) {
     case 'Rlerror': type = MESSAGE.Rlerror; body.u32(response.errno); break;
     case 'Rversion': type = MESSAGE.Rversion; body.u32(validMsize(response.msize)).string(response.version); break;
     case 'Rattach': type = MESSAGE.Rattach; body.qid(response.qid); break;
     case 'Rflush': type = MESSAGE.Rflush; break;
-    case 'Rwalk': type = MESSAGE.Rwalk; if (response.qids.length > MAX_PATH_DEPTH) fail('Too many walk QIDs.'); body.u16(response.qids.length); for (const qid of response.qids) body.qid(qid); break;
+    case 'Rwalk': {
+      if (!Array.isArray(response.qids) || response.qids.length > MAX_PATH_DEPTH) fail('Too many walk QIDs.');
+      type = MESSAGE.Rwalk; body.u16(response.qids.length); for (const qid of response.qids) body.qid(qid); break;
+    }
     case 'Rlopen': type = MESSAGE.Rlopen; body.qid(response.qid).u32(response.iounit); break;
     case 'Rlcreate': type = MESSAGE.Rlcreate; body.qid(response.qid).u32(response.iounit); break;
-    case 'Rread': type = MESSAGE.Rread; body.u32(response.data.byteLength).bytes(response.data); break;
+    case 'Rread': { const data = responseBytes(response.data); type = MESSAGE.Rread; body.u32(data.byteLength).bytes(data); break; }
     case 'Rwrite': type = MESSAGE.Rwrite; body.u32(response.count); break;
     case 'Rclunk': type = MESSAGE.Rclunk; break;
     case 'Rgetattr': type = MESSAGE.Rgetattr; body.u64(response.valid).qid(response.qid).u32(response.mode).u32(response.uid).u32(response.gid).u64(response.nlink).u64(response.rdev).u64(response.size).u64(response.blksize).u64(response.blocks).u64(response.atimeSec).u64(response.atimeNsec).u64(response.mtimeSec).u64(response.mtimeNsec).u64(response.ctimeSec).u64(response.ctimeNsec); break;
     case 'Rsetattr': type = MESSAGE.Rsetattr; break;
-    case 'Rreaddir': type = MESSAGE.Rreaddir; body.u32(response.data.byteLength).bytes(response.data); break;
+    case 'Rreaddir': { const data = responseBytes(response.data); type = MESSAGE.Rreaddir; body.u32(data.byteLength).bytes(data); break; }
     case 'Rfsync': type = MESSAGE.Rfsync; break;
     case 'Rmkdir': type = MESSAGE.Rmkdir; body.qid(response.qid); break;
     case 'Rrenameat': type = MESSAGE.Rrenameat; break;
     case 'Runlinkat': type = MESSAGE.Runlinkat; break;
+    default: return fail('Unsupported response type.');
   }
   const payload = body.finish();
-  return new Writer().u32(P9_HEADER_BYTES + payload.byteLength).u8(type).u16(response.tag).bytes(payload).finish();
+  const frame = new Writer(maximum).u32(P9_HEADER_BYTES + payload.byteLength).u8(type).u16(response.tag).bytes(payload).finish();
+  if (response.type === 'Rversion' && frame.byteLength > response.msize) fail('Rversion exceeds its negotiated msize.');
+  return frame;
 };
+
+/** Encodes a standalone response with the global 9P transport limit. */
+export const encodeResponse = (response: P9Response): Uint8Array => encodeResponseWithin(response, MAX_FRAME_BYTES);
+
+/**
+ * Per-connection codec state. A Tversion offer is accepted once, its matching
+ * Rversion selects the transport bound, and every subsequent frame is checked
+ * against that bound before payload decoding or response allocation.
+ */
+export class P9CodecSession {
+  private offeredMsize: number | null = null;
+  private versionTag: number | null = null;
+  private msize: number | null = null;
+
+  get negotiatedMsize(): number | null { return this.msize; }
+
+  decodeRequest(frame: Uint8Array): P9Request {
+    const request = decodeRequestWithin(frame, this.msize ?? MAX_FRAME_BYTES);
+    if (request.type === 'Tversion') {
+      this.offeredMsize = request.msize;
+      this.versionTag = request.tag;
+      this.msize = null;
+    } else if (this.msize === null) {
+      fail('Tversion must be negotiated before other requests.');
+    }
+    return request;
+  }
+
+  encodeResponse(response: P9Response): Uint8Array {
+    if (!response || typeof response !== 'object') fail('Invalid response.');
+    if (response.type === 'Rversion') {
+      const offeredMsize = this.offeredMsize;
+      const versionTag = this.versionTag;
+      if (offeredMsize === null || versionTag === null) return fail('Rversion has no Tversion offer.');
+      validMsize(response.msize);
+      if (response.tag !== versionTag || response.msize > offeredMsize) fail('Invalid Rversion negotiation.');
+      const frame = encodeResponseWithin(response, response.msize);
+      this.msize = response.msize;
+      this.offeredMsize = null;
+      this.versionTag = null;
+      return frame;
+    }
+    const msize = this.msize;
+    if (msize === null) return fail('Tversion must be negotiated before other responses.');
+    return encodeResponseWithin(response, msize);
+  }
+}

@@ -24,11 +24,17 @@ describe('9P codec resource limits', () => {
 
   it('handles 10,000 deterministic adversarial frames with typed bounded outcomes', () => {
     let state = 0x6d2b79f5;
-    const backing = new Uint8Array(MAX_FRAME_BYTES + 1);
+    const messageTypes = [100, 104, 108, 110, 12, 14, 116, 118, 120, 24, 26, 40, 50, 72, 74, 76];
+    const backing = new Uint8Array(4_103);
     for (let index = 0; index < 10_000; index += 1) {
       state = next(state);
-      const length = index === 0 ? 0 : index === 1 ? MAX_FRAME_BYTES + 1 : state % (MAX_FRAME_BYTES + 2);
-      for (let byte = 0; byte < Math.min(length, 32); byte += 1) {
+      const bodyLength = state % 4_096;
+      const length = 7 + bodyLength;
+      const view = new DataView(backing.buffer, 0, length);
+      view.setUint32(0, length, true);
+      backing[4] = messageTypes[index % messageTypes.length] as number;
+      view.setUint16(5, state & 0xffff, true);
+      for (let byte = 7; byte < length; byte += 1) {
         state = next(state);
         backing[byte] = state & 0xff;
       }
@@ -39,5 +45,14 @@ describe('9P codec resource limits', () => {
         expect(error).toBeInstanceOf(P9DecodeError);
       }
     }
+  });
+
+  it('handles corrupt counted lengths, UTF-8, and Twrite payload lengths as typed errors', () => {
+    const cases = [
+      Uint8Array.from([13, 0, 0, 0, 100, 1, 0, 0, 1, 0, 0, 0xff, 0xff]),
+      Uint8Array.from([14, 0, 0, 0, 100, 1, 0, 0, 1, 0, 0, 1, 0, 0xff]),
+      Uint8Array.from([23, 0, 0, 0, 118, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]),
+    ];
+    for (const frame of cases) expect(() => decodeRequest(frame)).toThrow(P9DecodeError);
   });
 });
