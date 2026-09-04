@@ -1,0 +1,39 @@
+{
+  "name": "kcode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && npm run assets:verify && vite build",
+    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:e2e": "playwright test",
+    "assets:sync": "node scripts/sync-v86-assets.mjs",
+    "assets:verify": "node scripts/verify-vm-assets.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "v86": "0.5.458",
+    "vue": "3.5.42"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "2.7.1",
+    "@testing-library/vue": "8.1.0",
+    "@types/chrome": "0.2.8",
+    "@types/node": "26.4.1",
+    "@vitejs/plugin-vue": "6.0.8",
+    "fake-indexeddb": "6.2.5",
+    "jsdom": "30.0.1",
+    "playwright": "1.62.1",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "5.0.0",
+    "vue-tsc": "3.3.11"
+  }
+}
