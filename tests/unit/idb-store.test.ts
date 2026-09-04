@@ -119,6 +119,17 @@ describe('WorkspaceStore', () => {
     await expect(store.verifyHandleBinding('forged-workspace-id', sameEntryDirectoryHandle('selected-entry'))).rejects.toThrow('WORKSPACE_HANDLE_MISMATCH');
   });
 
+  it('rejects a cached binding after another store replaces the persisted selection', async () => {
+    // Break caught: a long-lived Worker cache can authorize an old handle after another Side Panel context selects a new workspace.
+    const workerStore = new WorkspaceStore();
+    const first = await workerStore.save(sameEntryDirectoryHandle('first-entry'));
+    await workerStore.load();
+    await new WorkspaceStore().save(sameEntryDirectoryHandle('replacement-entry'));
+
+    await expect(workerStore.verifyHandleBinding(first.workspaceId, sameEntryDirectoryHandle('first-entry')))
+      .rejects.toThrow('WORKSPACE_HANDLE_MISMATCH');
+  });
+
   it('maps a cancelled directory selection to a stable code', async () => {
     vi.stubGlobal('showDirectoryPicker', vi.fn().mockRejectedValue(new DOMException('cancelled', 'AbortError')));
 

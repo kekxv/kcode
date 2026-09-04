@@ -149,6 +149,8 @@ describe('P9Server lifecycle', () => {
 
       await new P9Server().setRoot(root as unknown as FileSystemDirectoryHandle);
       await expect(root.getFileHandle('recover.txt')).rejects.toMatchObject({ name: 'NotFoundError' });
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual([]);
+      await expect(new P9Server().setRoot(root as unknown as FileSystemDirectoryHandle)).resolves.toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }

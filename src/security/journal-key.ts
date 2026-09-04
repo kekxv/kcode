@@ -19,18 +19,55 @@ const openKeyDatabase = async (): Promise<IDBDatabase> => {
   throw new Error('JOURNAL_KEY_STORE_FAILED');
 };
 const requestResult = <T>(request: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error ?? new Error('JOURNAL_KEY_STORE_FAILED')); });
+const isJournalKey = (value: unknown): value is CryptoKey => {
+  if (!value || typeof value !== 'object') return false;
+  const key = value as CryptoKey;
+  return key.type === 'secret'
+    && key.extractable === false
+    && key.algorithm?.name === 'AES-GCM'
+    && (key.algorithm as AesKeyAlgorithm).length === 256
+    && key.usages.includes('encrypt')
+    && key.usages.includes('decrypt');
+};
+const readKey = async (database: IDBDatabase): Promise<unknown> => {
+  const transaction = database.transaction(STORE, 'readonly');
+  return requestResult(transaction.objectStore(STORE).get(KEY));
+};
+const addKey = (database: IDBDatabase, key: CryptoKey): Promise<void> => new Promise((resolve, reject) => {
+  const transaction = database.transaction(STORE, 'readwrite');
+  const request = transaction.objectStore(STORE).add(key, KEY);
+  let collided = false;
+  request.onerror = (event) => {
+    if (request.error?.name === 'ConstraintError') {
+      collided = true;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    reject(request.error ?? new Error('JOURNAL_KEY_STORE_FAILED'));
+  };
+  transaction.oncomplete = () => resolve();
+  transaction.onerror = () => { if (!collided) reject(transaction.error ?? new Error('JOURNAL_KEY_STORE_FAILED')); };
+  transaction.onabort = () => reject(transaction.error ?? new Error('JOURNAL_KEY_STORE_FAILED'));
+});
 
 /** Returns the origin-local structured-cloneable journal key; it is deliberately non-extractable. */
 export const getJournalKey = async (): Promise<CryptoKey> => {
   if (typeof indexedDB === 'undefined') throw new Error('JOURNAL_KEY_STORE_UNAVAILABLE');
   const database = await openKeyDatabase();
   try {
-    const readTransaction = database.transaction(STORE, 'readonly');
-    const saved = await requestResult(readTransaction.objectStore(STORE).get(KEY));
-    if (saved && typeof saved === 'object' && (saved as CryptoKey).type === 'secret' && (saved as CryptoKey).algorithm.name === 'AES-GCM' && (saved as CryptoKey).extractable === false) return saved as CryptoKey;
-    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-    const writeTransaction = database.transaction(STORE, 'readwrite');
-    await requestResult(writeTransaction.objectStore(STORE).put(key, KEY));
-    return key;
+    const saved = await readKey(database);
+    if (saved !== undefined) {
+      if (!isJournalKey(saved)) throw new Error('JOURNAL_KEY_STORE_FAILED');
+      return saved;
+    }
+    const candidate = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    // Readwrite transactions are serialized across same-origin Worker
+    // connections. `add` elects one winner; a constraint collision leaves the
+    // winner untouched, after which every contender reads that persisted key.
+    await addKey(database, candidate);
+    const persisted = await readKey(database);
+    if (!isJournalKey(persisted)) throw new Error('JOURNAL_KEY_STORE_FAILED');
+    return persisted;
   } finally { database.close(); }
 };

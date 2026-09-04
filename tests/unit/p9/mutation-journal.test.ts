@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FsaBackend } from '../../../src/worker/p9/fsa-backend';
-import { MutationJournal, MemoryJournalStorage } from '../../../src/worker/p9/mutation-journal';
+import { MutationJournal, MemoryJournalStorage, OpfsJournalStorage } from '../../../src/worker/p9/mutation-journal';
 import { MemoryFsaRoot } from '../../helpers/memory-fsa';
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('MutationJournal', () => {
   it('encrypts the original file before mutation and restores it on rollback', async () => {
@@ -81,5 +83,23 @@ describe('MutationJournal', () => {
     const current = await (await root.getFileHandle('notes.txt')).getFile();
     expect(new TextDecoder().decode(new Uint8Array(await current.arrayBuffer()))).toBe('after!');
     expect(await storage.list()).toEqual(['entry-1.bin']);
+  });
+
+  it('removes the committed OPFS transaction directory from recovery enumeration', async () => {
+    // Break caught: deleting only record files leaves an empty transaction directory that the next startup treats as a tampered journal.
+    const opfsRoot = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const journal = await MutationJournal.begin('txn-committed', await OpfsJournalStorage.open('workspace-1', 'txn-committed'), key);
+    await journal.record({ path: 'created.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 });
+
+    await journal.commit();
+
+    await expect(OpfsJournalStorage.transactionIds('workspace-1')).resolves.toEqual([]);
+    await expect(MutationJournal.begin(
+      'txn-committed',
+      await OpfsJournalStorage.open('workspace-1', 'txn-committed'),
+      key,
+    )).resolves.toBeInstanceOf(MutationJournal);
   });
 });

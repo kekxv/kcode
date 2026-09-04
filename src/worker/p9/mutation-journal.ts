@@ -29,7 +29,11 @@ export class MemoryJournalStorage implements JournalStorage {
 
 /** OPFS transaction directory; records are encrypted before reaching this store. */
 export class OpfsJournalStorage implements JournalStorage {
-  private constructor(private readonly directory: FileSystemDirectoryHandle) {}
+  private constructor(
+    private readonly parent: FileSystemDirectoryHandle,
+    private readonly transactionId: string,
+    private readonly directory: FileSystemDirectoryHandle,
+  ) {}
   private static async journalRoot(create: boolean): Promise<FileSystemDirectoryHandle> {
     const storage = (navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> }).getDirectory;
     if (!storage) throw new Error('JOURNAL_STORAGE_UNAVAILABLE');
@@ -45,9 +49,13 @@ export class OpfsJournalStorage implements JournalStorage {
   static async open(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> {
     if (!this.validId(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
     const journal = await this.workspaceRoot(workspaceId, true);
-    return new OpfsJournalStorage(await journal.getDirectoryHandle(transactionId, { create: true }));
+    return new OpfsJournalStorage(journal, transactionId, await journal.getDirectoryHandle(transactionId, { create: true }));
   }
-  static async openExisting(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> { return new OpfsJournalStorage(await (await this.workspaceRoot(workspaceId, false)).getDirectoryHandle(transactionId)); }
+  static async openExisting(workspaceId: string, transactionId: string): Promise<OpfsJournalStorage> {
+    if (!this.validId(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
+    const journal = await this.workspaceRoot(workspaceId, false);
+    return new OpfsJournalStorage(journal, transactionId, await journal.getDirectoryHandle(transactionId));
+  }
   static async transactionIds(workspaceId: string): Promise<string[]> {
     try {
       const journal = await this.workspaceRoot(workspaceId, false); const ids: string[] = [];
@@ -59,7 +67,13 @@ export class OpfsJournalStorage implements JournalStorage {
   async get(name: string): Promise<Uint8Array | null> { try { const file = await this.directory.getFileHandle(name); return new Uint8Array(await (await file.getFile()).arrayBuffer()); } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return null; throw error; } }
   async remove(name: string): Promise<void> { await this.directory.removeEntry(name); }
   async list(): Promise<string[]> { const values: string[] = []; for await (const [name] of (this.directory as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) values.push(name); return values; }
-  async clear(): Promise<void> { for (const name of await this.list()) await this.directory.removeEntry(name, { recursive: true }); }
+  async clear(): Promise<void> {
+    try {
+      await this.parent.removeEntry(this.transactionId, { recursive: true });
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
+    }
+  }
 }
 
 /** Encrypted, bounded rollback journal. OPFS adapters supply the durable storage in production. */

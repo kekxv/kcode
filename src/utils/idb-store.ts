@@ -111,11 +111,17 @@ export class WorkspaceStore {
     return workspace;
   }
 
-  async load(): Promise<StoredWorkspace | null> {
-    if (this.cachedWorkspace !== undefined) return this.cachedWorkspace;
+  private async loadPersisted(): Promise<StoredWorkspace | null> {
     const workspace = await this.transact('readonly', (store) => store.get(SELECTED_DIRECTORY_KEY));
     if (workspace === undefined) return null;
     if (!isStoredWorkspace(workspace)) throw stableError('WORKSPACE_STORAGE_FAILURE');
+    return workspace;
+  }
+
+  async load(): Promise<StoredWorkspace | null> {
+    if (this.cachedWorkspace !== undefined) return this.cachedWorkspace;
+    const workspace = await this.loadPersisted();
+    if (workspace === null) return null;
     this.cachedWorkspace = workspace;
     return workspace;
   }
@@ -125,12 +131,16 @@ export class WorkspaceStore {
    * to the workspace association persisted by the trusted Side Panel.
    */
   async verifyHandleBinding(workspaceId: string, handle: FileSystemDirectoryHandle): Promise<void> {
-    const workspace = await this.load();
-    const persisted = workspace?.handle as (FileSystemDirectoryHandle & { isSameEntry?: (other: FileSystemHandle) => Promise<boolean> }) | undefined;
+    // This is an authorization check, so it must bypass the convenience cache:
+    // another extension context may have replaced the selected workspace.
+    const workspace = await this.loadPersisted();
+    this.cachedWorkspace = workspace ?? undefined;
+    const persisted = workspace?.handle;
+    const candidate = handle as FileSystemDirectoryHandle & { isSameEntry?: (other: FileSystemHandle) => Promise<boolean> };
     if (workspace?.workspaceId !== workspaceId || persisted?.kind !== 'directory' || handle?.kind !== 'directory'
-      || typeof persisted.isSameEntry !== 'function') throw stableError('WORKSPACE_HANDLE_MISMATCH');
+      || typeof candidate.isSameEntry !== 'function') throw stableError('WORKSPACE_HANDLE_MISMATCH');
     try {
-      if (!(await persisted.isSameEntry(handle))) throw stableError('WORKSPACE_HANDLE_MISMATCH');
+      if (!(await candidate.isSameEntry(persisted))) throw stableError('WORKSPACE_HANDLE_MISMATCH');
     } catch {
       throw stableError('WORKSPACE_HANDLE_MISMATCH');
     }

@@ -157,6 +157,37 @@ describe('vm.worker lifecycle correlation', () => {
     expect(postMessage).not.toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' });
   });
 
+  it('does not attach a stale handle to a replacement runtime after identity verification yields', async () => {
+    // Break caught: an old attach continuation can read the global runtime after VM_INIT replacement and recover/mount its handle on the new VM.
+    class TestDirectoryHandle {}
+    let finishVerification!: () => void;
+    const verifyHandleBinding = vi.fn(() => new Promise<void>((resolve) => { finishVerification = resolve; }));
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { verifyHandleBinding = verifyHandleBinding; } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'old-boot', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'old-boot' }));
+    const staleHandle = new TestDirectoryHandle();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'stale-attach', handle: staleHandle } } as MessageEvent);
+    await vi.waitFor(() => expect(verifyHandleBinding).toHaveBeenCalledOnce());
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'replacement-boot', session } } as MessageEvent);
+    const replacementRuntime = FakeRuntime.instances[1];
+    finishVerification();
+    replacementRuntime.resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'replacement-boot' }));
+
+    expect(FakeRuntime.instances[0].attachedHandles).toEqual([]);
+    expect(replacementRuntime.attachedHandles).toEqual([]);
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'stale-attach' }));
+  });
+
   it('surfaces an ambiguous startup journal as a workspace conflict', async () => {
     // Break caught: collapsing recovery conflict into a generic attach error hides that an uncommitted host mutation remains durable.
     class TestDirectoryHandle {}
