@@ -5,7 +5,11 @@ const SECRET_FILES = new Set(['id_rsa', 'id_ed25519', '.npmrc', '.pypirc']);
 const SECRET_DIRECTORIES = new Set(['.ssh', '.aws', '.azure']);
 const ENVIRONMENT_EXAMPLES = new Set(['.env.example', '.env.sample', '.env.template']);
 
-const fold = (segment: string): string => segment.normalize('NFKC').toLowerCase();
+/** NFKC covers compatibility forms; these expansions cover multi-character Unicode case folds. */
+const fold = (segment: string): string => segment
+  .normalize('NFKC')
+  .toLowerCase()
+  .replaceAll('ß', 'ss');
 
 export const isSensitivePath = (path: WorkspacePath): boolean => {
   const segments = path.map(fold);

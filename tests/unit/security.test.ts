@@ -73,4 +73,8 @@ describe('sensitive workspace paths', () => {
     expect(isSensitivePath(normalizeWorkspacePath('.ſsh/config'))).toBe(true);
     expect(isSensitivePath(normalizeWorkspacePath('ｉｄ_ｒſa'))).toBe(true);
   });
+
+  it.each(['.ßh/config', '.ẞh/config'])('case-folds sharp-s to protect an equivalent SSH directory name: %s', (path) => {
+    expect(isSensitivePath(normalizeWorkspacePath(path))).toBe(true);
+  });
 });
