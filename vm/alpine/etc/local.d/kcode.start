@@ -1,3 +1,2 @@
 #!/bin/sh
-mkdir -p /workspace
 printf 'KCODE_GUEST_READY\n' >/dev/ttyS0

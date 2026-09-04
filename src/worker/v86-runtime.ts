@@ -1,6 +1,6 @@
 import { V86, type V86Options } from 'v86';
 
-export const VM_MEMORY_BYTES = 128 * 1024 * 1024;
+export const VM_MEMORY_BYTES = 256 * 1024 * 1024;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
 export const MAX_COMMAND_SERIAL_BYTES = 8 * 1024 * 1024;
 export const VM_BOOT_TIMEOUT_MS = 30_000;
@@ -21,7 +21,10 @@ type V86RuntimeDependencies = {
   readyTimeoutMs?: number;
 };
 
-const extensionAssetUrl: AssetUrlResolver = (name) => chrome.runtime.getURL(`v86/${name}`);
+const extensionAssetUrl: AssetUrlResolver = (name) => {
+  if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) return chrome.runtime.getURL(`v86/${name}`);
+  return new URL(`../v86/${name}`, self.location.href).href;
+};
 
 /** Owns one offline v86 instance inside one Dedicated Worker. */
 export class V86Runtime {
@@ -57,6 +60,8 @@ export class V86Runtime {
       initrd: { url: this.assetUrl('kcode-initramfs') },
       memory_size: VM_MEMORY_BYTES,
       autostart: true,
+      // Snapshot capture uses the interpreter so two fresh states are byte-identical.
+      disable_jit: true,
       cmdline: 'console=ttyS0',
       // Preserve the single virtio-9P device for the authorized Task 7 backend.
       filesystem: {},

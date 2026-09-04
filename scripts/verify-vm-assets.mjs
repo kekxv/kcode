@@ -5,12 +5,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const assetsDirectory = join(root, 'public', 'v86');
+const assetsDirectory = process.env.KCODE_VM_ASSETS_DIRECTORY ?? join(root, 'public', 'v86');
 const manifestPath = join(assetsDirectory, 'asset-manifest.json');
 const apkLockPath = join(root, 'vm', 'alpine', 'apk.lock');
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const digest = /^[a-f0-9]{64}$/;
-const expectedNames = new Set(['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']);
+const expectedNames = new Set(['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs', 'alpine-state.bin.zst']);
+const standardRootfsLimit = 60 * 1024 * 1024;
 const permittedMetadata = new Set(['README.md', 'asset-manifest.json']);
 const errors = [];
 
@@ -63,6 +64,9 @@ if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v8
     try {
       const details = await stat(join(assetsDirectory, name));
       if (!details.isFile()) throw new Error('not a regular file');
+      if (name === 'kcode-rootfs.sqfs' && details.size > standardRootfsLimit) {
+        fail(`kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit (${details.size} bytes > ${standardRootfsLimit} bytes)`);
+      }
       const actual = sha256(await readFile(join(assetsDirectory, name)));
       if (actual !== expectedDigest) fail(`${name}: SHA-256 mismatch (${actual})`);
     } catch {

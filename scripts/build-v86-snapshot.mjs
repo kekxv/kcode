@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const assets = join(root, 'public', 'v86');
 const manifestPath = join(assets, 'asset-manifest.json');
 const snapshotPath = join(assets, 'alpine-state.bin.zst');
-const baseAssets = ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs'];
+const baseAssets = ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs'];
 const protectedMarkers = ['KCODE_PROTECTED_PATH_TEST_MARKER', 'KCODE_SECRET_TEST_MARKER', 'BEGIN OPENSSH PRIVATE KEY', '/.ssh/', '/.env'];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -76,41 +76,55 @@ try {
     try {
       const page = await context.newPage();
       await page.goto(`${origin}/snapshot.html`);
-      return await page.evaluate(async ({ base, memory }) => {
+      const downloadPromise = page.waitForEvent('download');
+      await page.evaluate(async ({ base, memory }) => {
         const { V86 } = await import('/libv86.mjs');
         const vm = new V86({
           wasm_path: `${base}/v86/v86.wasm`, bios: { url: `${base}/v86/seabios.bin` },
           vga_bios: { url: `${base}/v86/vgabios.bin` }, bzimage: { url: `${base}/v86/vmlinuz-virt` },
           initrd: { url: `${base}/v86/kcode-initramfs` }, cmdline: 'console=ttyS0',
-          memory_size: memory, autostart: true, filesystem: {},
+          memory_size: memory, autostart: true, disable_jit: true, filesystem: {},
         });
+        let saved;
         await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('KCODE_GUEST_READY timeout')), 30_000);
-          vm.add_listener('serial0-output-byte', (() => {
-            let output = '';
-            return (byte) => {
-              output += String.fromCharCode(byte);
-              if (output.includes('KCODE_GUEST_READY')) { clearTimeout(timer); resolve(); }
-              if (output.length > 1024) output = output.slice(-1024);
-            };
-          })());
+          let output = '';
+          const timer = setTimeout(() => reject(new Error(`KCODE_GUEST_READY timeout; serial tail: ${output}`)), 30_000);
+          vm.add_listener('serial0-output-byte', (byte) => {
+            output += String.fromCharCode(byte);
+            if (!saved && output.includes('KCODE_GUEST_READY')) {
+              saved = vm.save_state();
+              clearTimeout(timer);
+              resolve();
+            }
+            if (output.length > 8192) output = output.slice(-8192);
+          });
         });
-        const saved = await vm.save_state();
+        if (!saved) throw new Error('KCODE_GUEST_READY did not produce a snapshot state');
+        const state = await saved;
         await vm.destroy();
-        return Array.from(new Uint8Array(saved));
-      }, { base: origin, memory: 128 * 1024 * 1024 });
+        const anchor = document.createElement('a');
+        anchor.href = URL.createObjectURL(new Blob([state]));
+        anchor.download = 'alpine-state.bin';
+        anchor.click();
+      }, { base: origin, memory: 256 * 1024 * 1024 });
+      const download = await downloadPromise;
+      const downloadedPath = await download.path();
+      if (!downloadedPath) throw new Error('snapshot state download did not complete');
+      return await fs.readFile(downloadedPath);
     } finally {
       await context.close();
     }
   };
-  const first = Uint8Array.from(await captureFreshState());
-  const second = Uint8Array.from(await captureFreshState());
+  const first = await captureFreshState();
+  const second = await captureFreshState();
   if (first.length !== second.length || first.some((byte, index) => byte !== second[index])) {
-    throw new Error('two fresh snapshots differ; refusing non-reproducible output');
+    const offset = first.findIndex((byte, index) => byte !== second[index]);
+    throw new Error(`two fresh snapshots differ at byte ${offset} (${first.length} bytes vs ${second.length} bytes); refusing non-reproducible output`);
   }
   const raw = first;
   for (const marker of protectedMarkers) {
-    if (Buffer.from(raw).includes(Buffer.from(marker))) throw new Error(`snapshot contains protected marker: ${marker}`);
+    const markerOffset = Buffer.from(raw).indexOf(Buffer.from(marker));
+    if (markerOffset >= 0) throw new Error(`snapshot contains protected marker: ${marker} at byte ${markerOffset}`);
   }
   const temporary = `${snapshotPath}.tmp-${process.pid}`;
   await fs.writeFile(temporary, zstdCompressSync(raw));
