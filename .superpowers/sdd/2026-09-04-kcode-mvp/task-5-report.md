@@ -15,6 +15,7 @@
 ## Commit
 
 - `a0cd089 feat: add reproducible v86 alpine runtime`
+- `aebb371 fix: harden v86 boot readiness`
 
 ## TDD and checks
 
