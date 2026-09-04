@@ -5,8 +5,8 @@ export const MAX_JOURNAL_TRANSACTION_BYTES = 100 * 1024 * 1024;
 
 export type JournalEntrySummary = { path: string; operation: 'create' | 'write' | 'delete' | 'rename'; originalBytes: number; resultingBytes: number };
 export type JournalSummary = { transactionId: string; state: 'clean' | 'dirty' | 'needs-rollback' | 'conflict'; entries: readonly JournalEntrySummary[]; journalBytes: number; writtenBytes: number };
-export type JournalOriginal = { exists: boolean; bytes?: Uint8Array; lastModified?: number; size?: number };
-export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; resultingBytes: number };
+export type JournalOriginal = { exists: boolean; kind?: FileSystemHandleKind; bytes?: Uint8Array; lastModified?: number; size?: number; sha256?: string };
+export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; expected?: JournalOriginal | null; resultingBytes: number };
 export type JournalStorage = { put(name: string, bytes: Uint8Array): Promise<void>; get(name: string): Promise<Uint8Array | null>; remove(name: string): Promise<void>; list(): Promise<string[]>; clear(): Promise<void> };
 type EncryptedRecord = { iv: Uint8Array; ciphertext: Uint8Array };
 
@@ -30,12 +30,23 @@ export class MemoryJournalStorage implements JournalStorage {
 /** OPFS transaction directory; records are encrypted before reaching this store. */
 export class OpfsJournalStorage implements JournalStorage {
   private constructor(private readonly directory: FileSystemDirectoryHandle) {}
-  static async open(transactionId: string): Promise<OpfsJournalStorage> {
+  private static async journalRoot(create: boolean): Promise<FileSystemDirectoryHandle> {
     const storage = (navigator.storage as unknown as { getDirectory?: () => Promise<FileSystemDirectoryHandle> }).getDirectory;
     if (!storage) throw new Error('JOURNAL_STORAGE_UNAVAILABLE');
     const root = await storage.call(navigator.storage);
-    const journal = await root.getDirectoryHandle('kcode-journal', { create: true });
+    return root.getDirectoryHandle('kcode-journal', create ? { create: true } : undefined);
+  }
+  static async open(transactionId: string): Promise<OpfsJournalStorage> {
+    const journal = await this.journalRoot(true);
     return new OpfsJournalStorage(await journal.getDirectoryHandle(transactionId, { create: true }));
+  }
+  static async openExisting(transactionId: string): Promise<OpfsJournalStorage> { return new OpfsJournalStorage(await (await this.journalRoot(false)).getDirectoryHandle(transactionId)); }
+  static async transactionIds(): Promise<string[]> {
+    try {
+      const journal = await this.journalRoot(false); const ids: string[] = [];
+      for await (const [name, handle] of (journal as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) if (handle.kind === 'directory' && /^[A-Za-z0-9_-]{1,64}$/.test(name)) ids.push(name);
+      return ids.sort();
+    } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return []; throw error; }
   }
   async put(name: string, bytes: Uint8Array): Promise<void> { const file = await this.directory.getFileHandle(name, { create: true }); const writable = await file.createWritable(); await writable.write(bytes as unknown as FileSystemWriteChunkType); await writable.close(); }
   async get(name: string): Promise<Uint8Array | null> { try { const file = await this.directory.getFileHandle(name); return new Uint8Array(await (await file.getFile()).arrayBuffer()); } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return null; throw error; } }
@@ -55,7 +66,27 @@ export class MutationJournal {
 
   static async begin(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
+    if ((await storage.list()).length) throw new Error('JOURNAL_TRANSACTION_EXISTS');
     return new MutationJournal(transactionId, storage, await key);
+  }
+  /** Rehydrates a pre-existing transaction without ever treating its records as a new journal. */
+  static async openExisting(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
+    const journal = new MutationJournal(transactionId, storage, await key);
+    const names = (await storage.list()).sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+    if (!names.length || names.some((name, index) => name !== nameFor(index + 1))) throw new Error('JOURNAL_TAMPERED');
+    for (let index = 0; index < names.length; index += 1) {
+      const encrypted = await storage.get(names[index]);
+      if (!encrypted) throw new Error('JOURNAL_TAMPERED');
+      const record = await journal.decrypt(index + 1, encrypted);
+      journal.validate(record);
+      const original = record.original.bytes ?? new Uint8Array();
+      journal.records.push({ id: index + 1, record });
+      journal.entries.push({ path: record.path, operation: record.operation, originalBytes: original.byteLength, resultingBytes: record.resultingBytes });
+      journal.journalBytes += encrypted.byteLength; journal.writtenBytes += record.resultingBytes;
+    }
+    journal.state = 'needs-rollback';
+    return journal;
   }
   summary(): JournalSummary { return { transactionId: this.transactionId, state: this.state, entries: [...this.entries], journalBytes: this.journalBytes, writtenBytes: this.writtenBytes }; }
   markNeedsRollback(): void { if (this.state === 'dirty') this.state = 'needs-rollback'; }
@@ -67,22 +98,59 @@ export class MutationJournal {
     if (original.byteLength > MAX_JOURNAL_FILE_BYTES || record.resultingBytes > MAX_JOURNAL_FILE_BYTES) throw new Error('JOURNAL_FILE_LIMIT');
     if (this.writtenBytes + record.resultingBytes > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
     const id = this.records.length + 1;
-    const plaintext = encoder.encode(JSON.stringify({ ...record, original: { ...record.original, bytes: asBase64(original) } }));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, plaintext));
-    const envelope = encoder.encode(JSON.stringify({ iv: asBase64(iv), ciphertext: asBase64(ciphertext) }));
-    if (this.journalBytes + envelope.byteLength > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
-    await this.storage.put(nameFor(id), envelope);
-    this.records.push({ id, record: { ...record, original: { ...record.original, bytes: original } } });
+    const normalized: JournalRecord = { ...record, expected: record.expected ?? null, original: { ...record.original, bytes: original } };
+    const encrypted = await this.encrypt(id, normalized);
+    if (this.journalBytes + encrypted.byteLength > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
+    await this.storage.put(nameFor(id), encrypted);
+    this.records.push({ id, record: normalized });
     this.entries.push({ path: record.path, operation: record.operation, originalBytes: original.byteLength, resultingBytes: record.resultingBytes });
-    this.journalBytes += envelope.byteLength; this.writtenBytes += record.resultingBytes; this.state = 'dirty';
+    this.journalBytes += encrypted.byteLength; this.writtenBytes += record.resultingBytes; this.state = 'dirty';
+  }
+
+  /** Persists the post-operation state after the FSA mutation completed. */
+  async setExpected(path: string, expected: JournalOriginal): Promise<void> {
+    const entry = this.records.find((candidate) => candidate.record.path === path);
+    if (!entry || this.state === 'clean' || this.state === 'conflict') throw new Error('JOURNAL_EXPECTED_STATE_INVALID');
+    entry.record.expected = { ...expected, bytes: undefined };
+    await this.storage.put(nameFor(entry.id), await this.encrypt(entry.id, entry.record));
   }
 
   async commit(): Promise<void> { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.storage.clear(); this.state = 'clean'; }
-  async rollback(restore: (path: string, original: JournalOriginal) => Promise<void>): Promise<void> { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); for (const { id } of [...this.records].reverse()) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); const record = await this.decrypt(id, encrypted); await restore(record.path, record.original); } await this.storage.clear(); this.state = 'clean'; }
-  async recover(restore: (path: string, original: JournalOriginal) => Promise<void>): Promise<void> { await this.rollback(restore); }
+  async rollback(
+    verifyOrRestore: ((path: string, expected: JournalOriginal) => Promise<boolean | void>) | ((path: string, original: JournalOriginal) => Promise<void>),
+    maybeRestore?: (path: string, original: JournalOriginal) => Promise<void>,
+  ): Promise<void> {
+    if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
+    const verify = maybeRestore ? verifyOrRestore as (path: string, expected: JournalOriginal) => Promise<boolean | void> : async () => true;
+    const restore = maybeRestore ?? verifyOrRestore as (path: string, original: JournalOriginal) => Promise<void>;
+    const records: JournalRecord[] = [];
+    for (const { id } of this.records) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); records.push(await this.decrypt(id, encrypted)); }
+    for (const record of records) if (maybeRestore && (!record.expected || await verify(record.path, record.expected) === false)) { this.state = 'conflict'; throw new Error('WORKSPACE_CONFLICT'); }
+    for (const record of records.reverse()) await restore(record.path, record.original);
+    await this.storage.clear(); this.state = 'clean';
+  }
 
+  private async encrypt(id: number, record: JournalRecord): Promise<Uint8Array> {
+    const encode = (snapshot: JournalOriginal | null | undefined): Record<string, unknown> | null => snapshot ? { ...snapshot, bytes: asBase64(snapshot.bytes ?? new Uint8Array()) } : null;
+    const plaintext = encoder.encode(JSON.stringify({ ...record, original: encode(record.original), expected: encode(record.expected) }));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, plaintext));
+    return encoder.encode(JSON.stringify({ iv: asBase64(iv), ciphertext: asBase64(ciphertext) }));
+  }
   private async decrypt(id: number, bytes: Uint8Array): Promise<JournalRecord> {
-    try { const parsed = JSON.parse(decoder.decode(bytes)) as { iv: string; ciphertext: string }; const iv = fromBase64(parsed.iv); const ciphertext = fromBase64(parsed.ciphertext); const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, ciphertext as unknown as BufferSource); const parsedRecord = JSON.parse(decoder.decode(plaintext)) as JournalRecord & { original: Omit<JournalOriginal, 'bytes'> & { bytes: string } }; return { ...parsedRecord, original: { ...parsedRecord.original, bytes: fromBase64(parsedRecord.original.bytes) } }; } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
+    try {
+      const parsed = JSON.parse(decoder.decode(bytes)) as { iv: string; ciphertext: string };
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: context(this.transactionId, id) as unknown as BufferSource }, this.key, fromBase64(parsed.ciphertext) as unknown as BufferSource);
+      const parsedRecord = JSON.parse(decoder.decode(plaintext)) as JournalRecord & { original: Omit<JournalOriginal, 'bytes'> & { bytes: string }; expected?: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null };
+      const decode = (snapshot: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null | undefined): JournalOriginal | null => snapshot ? { ...snapshot, bytes: fromBase64(snapshot.bytes) } : null;
+      return { ...parsedRecord, original: decode(parsedRecord.original)!, expected: decode(parsedRecord.expected) };
+    } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
+  }
+  private validate(record: JournalRecord): void {
+    if (!record || typeof record.path !== 'string' || record.path.split('/').some((part) => !part || part === '.' || part === '..')
+      || !['create', 'write', 'delete', 'rename'].includes(record.operation)
+      || !Number.isSafeInteger(record.resultingBytes) || record.resultingBytes < 0 || record.resultingBytes > MAX_JOURNAL_FILE_BYTES
+      || !record.original || typeof record.original.exists !== 'boolean'
+      || (record.expected !== null && record.expected !== undefined && typeof record.expected.exists !== 'boolean')) throw new Error('JOURNAL_TAMPERED');
   }
 }

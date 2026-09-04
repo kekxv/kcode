@@ -25,14 +25,38 @@ export class P9Server {
   private journalTransactionId: string | null = null;
   private readonly activeMutations = new Set<number>();
   private mutationPoisoned = false;
+  private transactionFinalizing = false;
+  private readonly mutationIdleWaiters = new Set<() => void>();
   constructor(backend?: FsaBackend, private readonly journalFactory: JournalFactory = async (transactionId) => {
     if (typeof navigator !== 'undefined' && typeof navigator.storage !== 'undefined') return OpfsJournalStorage.open(transactionId);
     return new MemoryJournalStorage();
   }) { this.backend = backend ?? null; }
-  async setRoot(root: FileSystemDirectoryHandle, policy: readonly WorkspaceCapability[] = ['read']): Promise<void> { this.backend = await FsaBackend.attach(root, policy); this.fids.clear(); this.qids.clear(); this.transaction = null; this.journal = null; this.journalTransactionId = null; this.mutationPoisoned = false; }
-  setTransactionPolicy(policy: TransactionPolicy | null): void { this.transaction = policy ? { transactionId: policy.transactionId, capabilities: Object.freeze([...policy.capabilities]) } : null; this.backend?.setPolicy(this.transaction?.capabilities ?? ['read']); if (!policy) this.mutationPoisoned = false; }
-  async commitTransaction(): Promise<void> { const journal = this.journal; if (!journal) return; if (this.mutationPoisoned) throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.'); await journal.commit(); this.journal = null; this.journalTransactionId = null; }
-  async rollbackTransaction(): Promise<void> { const journal = this.journal; if (!journal) return; const backend = this.needBackend(); await journal.rollback(async (path, original) => backend.restore(path.split('/'), original)); this.journal = null; this.journalTransactionId = null; this.mutationPoisoned = false; }
+  async setRoot(root: FileSystemDirectoryHandle, policy: readonly WorkspaceCapability[] = ['read']): Promise<void> { const backend = await FsaBackend.attach(root, policy); await this.recoverDurableJournals(backend); this.backend = backend; this.fids.clear(); this.qids.clear(); this.transaction = null; this.journal = null; this.journalTransactionId = null; this.mutationPoisoned = false; this.transactionFinalizing = false; }
+  setTransactionPolicy(policy: TransactionPolicy | null): void {
+    if (this.transactionFinalizing) throw new P9Error(ERRNO.EBUSY, 'Transaction finalization is in progress.');
+    if (policy && this.transaction && this.transaction.transactionId !== policy.transactionId && (this.activeMutations.size || this.journal?.summary().state !== 'clean')) throw new P9Error(ERRNO.EBUSY, 'Existing transaction requires finalization.');
+    this.transaction = policy ? { transactionId: policy.transactionId, capabilities: Object.freeze([...policy.capabilities]) } : null;
+    this.backend?.setPolicy(this.transaction?.capabilities ?? ['read']); if (!policy) this.mutationPoisoned = false;
+  }
+  async commitTransaction(): Promise<void> {
+    if (this.transactionFinalizing) throw new P9Error(ERRNO.EBUSY, 'Transaction finalization is in progress.');
+    this.transactionFinalizing = true;
+    try {
+      if (this.activeMutations.size) { this.mutationPoisoned = true; this.journal?.markNeedsRollback(); throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.'); }
+      const journal = this.journal; if (!journal) return;
+      if (this.mutationPoisoned) throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.');
+      await journal.commit(); this.journal = null; this.journalTransactionId = null;
+    } finally { this.transactionFinalizing = false; }
+  }
+  async rollbackTransaction(): Promise<void> {
+    if (this.transactionFinalizing) throw new P9Error(ERRNO.EBUSY, 'Transaction finalization is in progress.');
+    this.transactionFinalizing = true;
+    try {
+      if (this.activeMutations.size) { this.mutationPoisoned = true; this.journal?.markNeedsRollback(); await this.waitForMutations(); }
+      const journal = this.journal; if (!journal) return;
+      const backend = this.needBackend(); await journal.rollback(async (path, expected) => backend.matchesSnapshot(path.split('/'), expected), async (path, original) => backend.restore(path.split('/'), original)); this.journal = null; this.journalTransactionId = null; this.mutationPoisoned = false;
+    } finally { this.transactionFinalizing = false; }
+  }
   async recoverTransaction(): Promise<void> { await this.rollbackTransaction(); }
 
   async handle(frame: Uint8Array, reply: (response: Uint8Array) => void): Promise<void> {
@@ -70,14 +94,14 @@ export class P9Server {
       case 'Tfsync': this.needFid(request.fid); return { type: 'Rfsync', tag: request.tag };
       case 'Tmkdir': { const dir = this.fid(request.fid); const path = [...dir.pathSegments, request.name]; const created = await this.mutate(request.tag, 'create', [{ path, resultingBytes: 0 }], () => backend.mkdir(dir.pathSegments, request.name)); return { type: 'Rmkdir', tag: request.tag, qid: await this.qid(path, created.kind) }; }
       case 'Trenameat': { const oldDir = this.fid(request.olddirfid); const newDir = this.fid(request.newdirfid); const source = [...oldDir.pathSegments, request.oldname]; const destination = [...newDir.pathSegments, request.newname]; const snapshot = await backend.snapshot(source); await this.mutate(request.tag, 'rename', [{ path: source, resultingBytes: 0, original: snapshot }, { path: destination, resultingBytes: snapshot.size ?? 0 }], () => backend.rename(oldDir.pathSegments, request.oldname, newDir.pathSegments, request.newname)); return { type: 'Rrenameat', tag: request.tag }; }
-      case 'Tunlinkat': { const dir = this.fid(request.dirfid); const path = [...dir.pathSegments, request.name]; await this.mutate(request.tag, 'delete', [{ path, resultingBytes: 0 }], () => backend.remove(dir.pathSegments, request.name, (request.flags & 0x200) !== 0)); return { type: 'Runlinkat', tag: request.tag }; }
+      case 'Tunlinkat': { const dir = this.fid(request.dirfid); const path = [...dir.pathSegments, request.name]; if ((await backend.stat(path)).kind === 'directory' && (await backend.list(path)).length) throw new P9Error(ERRNO.ENOTEMPTY, 'Recursive directory deletion requires a subtree journal.'); await this.mutate(request.tag, 'delete', [{ path, resultingBytes: 0 }], () => backend.remove(dir.pathSegments, request.name, false)); return { type: 'Runlinkat', tag: request.tag }; }
     }
     throw new P9Error(ERRNO.ENOSYS, 'Unsupported 9P request.');
   }
   private async walk(request: Extract<P9Request, { type: 'Twalk' }>): Promise<P9Response> { const source = this.fid(request.fid); if (request.newfid !== request.fid && this.fids.has(request.newfid)) throw new P9Error(ERRNO.EBADF, 'New fid already exists.'); if (request.newfid !== request.fid && this.fids.size >= MAX_FIDS) throw new P9Error(ERRNO.EBUSY, 'Fid limit reached.'); let path = [...source.pathSegments]; const qids: Qid[] = []; for (const name of request.wnames) { if (name === '..') { if (path.length) path.pop(); } else { try { const stat = await this.needBackend().stat([...path, name]); path.push(name); qids.push(await this.qid(path, stat.kind)); } catch (error) { if (!qids.length) throw error; break; } } } this.fids.set(request.newfid, { pathSegments: path, openMode: null }); return { type: 'Rwalk', tag: request.tag, qids }; }
   private async mutate<T>(tag: number, operation: JournalRecord['operation'], entries: Array<{ path: readonly string[]; resultingBytes: number; original?: JournalOriginal }>, apply: () => Promise<T>, queuedBytes = 0): Promise<T> {
     if (!this.transaction) throw new P9Error(ERRNO.EACCES, 'Mutations require an approved transaction.');
-    if (this.mutationPoisoned || this.journal?.summary().state === 'needs-rollback') throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.');
+    if (this.transactionFinalizing || this.mutationPoisoned || this.journal?.summary().state === 'needs-rollback') throw new P9Error(ERRNO.EBUSY, 'Transaction requires rollback.');
     this.reserveMutation(queuedBytes);
     this.activeMutations.add(tag);
     try {
@@ -87,14 +111,16 @@ export class P9Server {
         const original = entry.original ?? await backend.snapshot(entry.path);
         await journal.record({ path: entry.path.join('/'), operation, original, resultingBytes: entry.resultingBytes });
       }
-      return await apply();
+      const result = await apply();
+      for (const entry of entries) await journal.setExpected(entry.path.join('/'), await backend.snapshot(entry.path));
+      return result;
     } catch (error) {
       if (this.mutationPoisoned || (error instanceof P9Error && error.errno === ERRNO.ETIMEDOUT)) {
         this.mutationPoisoned = true;
         this.journal?.markNeedsRollback();
       }
       throw error;
-    } finally { this.activeMutations.delete(tag); this.queuedMutationBytes -= queuedBytes; }
+    } finally { this.activeMutations.delete(tag); this.queuedMutationBytes -= queuedBytes; if (!this.activeMutations.size) { for (const resolve of this.mutationIdleWaiters) resolve(); this.mutationIdleWaiters.clear(); } }
   }
   private async ensureJournal(): Promise<MutationJournal> {
     const transaction = this.transaction;
@@ -108,6 +134,14 @@ export class P9Server {
     this.journalTransactionId = transaction.transactionId;
     return this.journal;
   }
+  private async recoverDurableJournals(backend: FsaBackend): Promise<void> {
+    if (typeof navigator === 'undefined' || typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory !== 'function') return;
+    for (const transactionId of await OpfsJournalStorage.transactionIds()) {
+      const journal = await MutationJournal.openExisting(transactionId, await OpfsJournalStorage.openExisting(transactionId));
+      await journal.rollback(async (path, expected) => backend.matchesSnapshot(path.split('/'), expected), async (path, original) => backend.restore(path.split('/'), original));
+    }
+  }
+  private async waitForMutations(): Promise<void> { if (!this.activeMutations.size) return; await new Promise<void>((resolve) => this.mutationIdleWaiters.add(resolve)); }
   private async readdir(path: readonly string[], offset: number, count: number): Promise<Uint8Array> { const entries = await this.needBackend().list(path); const writer = new Writer(count); for (let index = offset; index < entries.length; index += 1) { const entry = entries[index]; const item = new Writer(count).qid(await this.qid([...path, entry.name], entry.kind)).u64(BigInt(index + 1)).u8(qidType(entry.kind)).string(entry.name).finish(); if (writer.finish().byteLength + item.byteLength > count) break; writer.bytes(item); } return writer.finish(); }
   private async qid(path: readonly string[], knownKind?: FileSystemHandleKind): Promise<Qid> { const key = path.join('/'); let id = this.qids.get(key); if (id === undefined) { if (this.qids.size >= MAX_QIDS) throw new P9Error(ERRNO.ENOSPC, 'QID map limit reached.'); id = BigInt(this.qids.size + 1); this.qids.set(key, id); } const kind = knownKind ?? (await this.needBackend().stat(path)).kind; return { type: qidType(kind), version: 0, path: id }; }
   private fid(id: number): Fid { const fid = this.fids.get(id); if (!fid) throw new P9Error(ERRNO.EBADF, 'Unknown fid.'); return fid; }

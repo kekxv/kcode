@@ -5,6 +5,7 @@ type FileNode = { kind: 'file'; bytes: Uint8Array; modified: number };
 const clone = (value: Uint8Array): Uint8Array => new Uint8Array(value);
 const missing = (name: string): DOMException => new DOMException(name, 'NotFoundError');
 const exists = (name: string): DOMException => new DOMException(name, 'InvalidModificationError');
+const wrongType = (name: string): DOMException => new DOMException(name, 'TypeMismatchError');
 
 class MemoryFile implements Pick<FileSystemFileHandle, 'kind' | 'name' | 'getFile' | 'createWritable'> {
   readonly kind = 'file' as const;
@@ -41,14 +42,14 @@ class MemoryDirectory implements Pick<FileSystemDirectoryHandle, 'kind' | 'name'
   async getFileHandle(name: string, options: FileSystemGetFileOptions = {}): Promise<FileSystemFileHandle> {
     const found = this.node.entries.get(name);
     if (found?.kind === 'file') return new MemoryFile(name, found) as unknown as FileSystemFileHandle;
-    if (found || !options.create) throw missing(name);
+    if (found) throw wrongType(name); if (!options.create) throw missing(name);
     const file: FileNode = { kind: 'file', bytes: new Uint8Array(), modified: Date.now() };
     this.node.entries.set(name, file); return new MemoryFile(name, file) as unknown as FileSystemFileHandle;
   }
   async getDirectoryHandle(name: string, options: FileSystemGetDirectoryOptions = {}): Promise<FileSystemDirectoryHandle> {
     const found = this.node.entries.get(name);
     if (found?.kind === 'directory') return new MemoryDirectory(name, found) as unknown as FileSystemDirectoryHandle;
-    if (found || !options.create) throw missing(name);
+    if (found) throw wrongType(name); if (!options.create) throw missing(name);
     const directory: DirectoryNode = { kind: 'directory', entries: new Map(), modified: Date.now() };
     this.node.entries.set(name, directory); return new MemoryDirectory(name, directory) as unknown as FileSystemDirectoryHandle;
   }

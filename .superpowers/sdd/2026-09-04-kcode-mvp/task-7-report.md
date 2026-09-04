@@ -6,6 +6,9 @@
 - `FsaBackend` uses root-handle-only traversal, exact `root.resolve()` confinement, protected-path filtering/denial, capability checks, bounded I/O, and per-path locks.
 - Mutations require an approved transaction. `VM_BEGIN_TRANSACTION` carries only an ID: its capabilities are derived from the immutable session admitted by `VM_INIT`, never from guest-facing input. Commit and rollback revoke the transaction policy afterwards.
 - Rollback journal entries are AES-GCM encrypted with an origin-local, non-extractable IndexedDB key. The key store now upgrades an existing `kcode` IndexedDB database that predates `security-keys`.
+- Startup enumerates durable OPFS transaction directories, decrypts and validates every journal record with that persistent key, verifies expected post-mutation state, and recovers only when it can preserve both versions. Reusing a nonempty transaction ID is rejected.
+- Before rollback, every FSA target must match its encrypted expected post-mutation `kind`, size, mtime, and SHA-256. A host-side edit produces `WORKSPACE_CONFLICT`; no preimage is restored.
+- Transaction finalization blocks new mutations, rejects replacement of dirty or active transactions, and drains/poisons active mutations before rollback. A nonempty directory unlink is rejected with `ENOTEMPTY`; recursive deletion is never attempted with a one-node journal entry.
 - FSA operations that time out retain their mutation locks until their underlying, non-abortable promise settles. A timeout poisons the transaction and requires rollback before any subsequent mutation.
 - The 9P `Rgetattr` wire encoding now contains the full Linux 9P2000.L metadata payload required by the real guest kernel.
 
@@ -13,7 +16,7 @@
 
 ```text
 npm run test:run -- tests/unit/p9 tests/unit/journal-key.test.ts tests/security/resource-limits.test.ts tests/unit/vm-worker.test.ts tests/unit/protocol.test.ts tests/integration/vm-smoke.test.ts
-9 files passed; 59 tests passed; 1 real-VM test skipped by default
+9 files passed; 64 tests passed; 1 real-VM test skipped by default
 
 npm run typecheck
 exit 0
@@ -35,6 +38,6 @@ The real packaged extension test uses an actual OPFS `FileSystemDirectoryHandle`
 - an approved transaction writes successfully (`KCODE_WRITE_DONE:0`); and
 - explicit rollback removes that guest-written file from OPFS.
 
-## Remaining limitation
+## Storage note
 
-`OpfsJournalStorage` is durable for the current transaction, but startup-wide enumeration and recovery of orphaned transaction directories is not yet implemented. Browser storage cleanup is also not a guarantee of physical secure erase by the browser/storage medium.
+Browser storage cleanup is not a guarantee of physical secure erase by the browser/storage medium.
