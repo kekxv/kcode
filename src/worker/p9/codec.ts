@@ -34,14 +34,15 @@ export class Reader {
   private position: number;
   private readonly end: number;
 
-  constructor(private readonly input: Uint8Array, start = 0, end = input.byteLength) {
+  constructor(private readonly input: Uint8Array, start = 0, end?: number) {
     if (!(input instanceof Uint8Array)) fail('Packet must be a Uint8Array.');
+    const resolvedEnd = end ?? input.byteLength;
     boundedInteger(start, input.byteLength, 'reader start');
-    boundedInteger(end, input.byteLength, 'reader end');
-    if (start > end) fail('Invalid reader bounds.');
+    boundedInteger(resolvedEnd, input.byteLength, 'reader end');
+    if (start > resolvedEnd) fail('Invalid reader bounds.');
     this.view = new DataView(input.buffer, input.byteOffset, input.byteLength);
     this.position = start;
-    this.end = end;
+    this.end = resolvedEnd;
   }
 
   get remaining(): number { return this.end - this.position; }
@@ -167,7 +168,12 @@ const decodeRequestWithin = (frame: Uint8Array, maximum: number): P9Request => {
     }
     case MESSAGE.Tlopen: request = { type: 'Tlopen', tag, fid: reader.u32(), flags: reader.u32() }; break;
     case MESSAGE.Tlcreate: request = { type: 'Tlcreate', tag, fid: reader.u32(), name: component(reader.string()), flags: reader.u32(), mode: reader.u32(), gid: reader.u32() }; break;
-    case MESSAGE.Tread: request = { type: 'Tread', tag, fid: reader.u32(), offset: reader.u64(), count: reader.u32() }; break;
+    case MESSAGE.Tread: {
+      const fid = reader.u32(); const offset = reader.u64(); const count = reader.u32();
+      if (count > maximum - P9_HEADER_BYTES - 4) fail('Read count exceeds negotiated response capacity.');
+      request = { type: 'Tread', tag, fid, offset, count };
+      break;
+    }
     case MESSAGE.Twrite: {
       const fid = reader.u32(); const offset = reader.u64(); const count = reader.u32();
       request = { type: 'Twrite', tag, fid, offset, data: reader.bytes(count) };
@@ -176,7 +182,12 @@ const decodeRequestWithin = (frame: Uint8Array, maximum: number): P9Request => {
     case MESSAGE.Tclunk: request = { type: 'Tclunk', tag, fid: reader.u32() }; break;
     case MESSAGE.Tgetattr: request = { type: 'Tgetattr', tag, fid: reader.u32(), requestMask: reader.u64() }; break;
     case MESSAGE.Tsetattr: request = { type: 'Tsetattr', tag, fid: reader.u32(), valid: reader.u32(), mode: reader.u32(), uid: reader.u32(), gid: reader.u32(), size: reader.u64(), atimeSec: reader.u64(), atimeNsec: reader.u64(), mtimeSec: reader.u64(), mtimeNsec: reader.u64() }; break;
-    case MESSAGE.Treaddir: request = { type: 'Treaddir', tag, fid: reader.u32(), offset: reader.u64(), count: reader.u32() }; break;
+    case MESSAGE.Treaddir: {
+      const fid = reader.u32(); const offset = reader.u64(); const count = reader.u32();
+      if (count > maximum - P9_HEADER_BYTES - 4) fail('Read count exceeds negotiated response capacity.');
+      request = { type: 'Treaddir', tag, fid, offset, count };
+      break;
+    }
     case MESSAGE.Tfsync: request = { type: 'Tfsync', tag, fid: reader.u32(), datasync: reader.u32() }; break;
     case MESSAGE.Tmkdir: request = { type: 'Tmkdir', tag, fid: reader.u32(), name: component(reader.string()), mode: reader.u32(), gid: reader.u32() }; break;
     case MESSAGE.Trenameat: request = { type: 'Trenameat', tag, olddirfid: reader.u32(), oldname: component(reader.string()), newdirfid: reader.u32(), newname: component(reader.string()) }; break;

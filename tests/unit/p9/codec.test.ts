@@ -11,6 +11,34 @@ import {
   unknownRequestResponse,
 } from '../../../src/worker/p9/codec';
 
+const frame = (type: number, body: Uint8Array, tag = 1): Uint8Array => {
+  const value = new Uint8Array(7 + body.byteLength);
+  const view = new DataView(value.buffer);
+  view.setUint32(0, value.byteLength, true);
+  value[4] = type;
+  view.setUint16(5, tag, true);
+  value.set(body, 7);
+  return value;
+};
+
+const versionFrame = (msize: number): Uint8Array => frame(100, Uint8Array.from([
+  msize & 0xff, (msize >>> 8) & 0xff, (msize >>> 16) & 0xff, (msize >>> 24) & 0xff,
+  0x08, 0x00, ...new TextEncoder().encode('9P2000.L'),
+]));
+
+const readRequest = (type: 40 | 116, count: number): Uint8Array => {
+  const body = new Uint8Array(16);
+  new DataView(body.buffer).setUint32(12, count, true);
+  return frame(type, body);
+};
+
+const negotiatedMinimumSession = (): P9CodecSession => {
+  const session = new P9CodecSession();
+  session.decodeRequest(versionFrame(P9_MIN_MSIZE));
+  session.encodeResponse({ type: 'Rversion', tag: 1, msize: P9_MIN_MSIZE, version: '9P2000.L' });
+  return session;
+};
+
 describe('9P2000.L codec', () => {
   it('decodes the byte-exact Tversion fixture', () => {
     const tversion = Uint8Array.from([
@@ -75,6 +103,24 @@ describe('9P2000.L codec', () => {
       0xab, 0xcdef, 0x01234567, 0x0102030405060708n, '雪',
     ]);
     expect(reader.remaining).toBe(0);
+  });
+
+  it('validates Reader input before resolving its default end offset', () => {
+    expect(() => new Reader(null as unknown as Uint8Array)).toThrow(P9DecodeError);
+    expect(() => new Reader([] as unknown as Uint8Array)).toThrow(P9DecodeError);
+  });
+
+  it('rejects Tread and Treaddir counts larger than negotiated response capacity', () => {
+    const session = negotiatedMinimumSession();
+    expect(() => session.decodeRequest(readRequest(116, 0xffff_ffff))).toThrow(P9DecodeError);
+    expect(() => session.decodeRequest(readRequest(40, 0xffff_ffff))).toThrow(P9DecodeError);
+  });
+
+  it('accepts Tread and Treaddir counts at negotiated response capacity', () => {
+    const session = negotiatedMinimumSession();
+    const maximumCount = P9_MIN_MSIZE - 7 - 4;
+    expect(session.decodeRequest(readRequest(116, maximumCount))).toMatchObject({ type: 'Tread', count: maximumCount });
+    expect(session.decodeRequest(readRequest(40, maximumCount))).toMatchObject({ type: 'Treaddir', count: maximumCount });
   });
 
   it('makes Writer.u64 reject non-bigint values with a typed codec error', () => {
