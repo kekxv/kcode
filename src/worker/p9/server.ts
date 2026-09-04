@@ -1,4 +1,5 @@
 import type { WorkspaceCapability } from '../../types/protocol';
+import { getJournalKey } from '../../security/journal-key';
 import { ERRNO, MESSAGE } from './constants';
 import { P9CodecSession, P9DecodeError, Writer, toSafeBrowserNumber, unknownRequestResponse } from './codec';
 import { FsaBackend, P9Error } from './fsa-backend';
@@ -134,11 +135,12 @@ export class P9Server {
     if (this.journal && this.journalTransactionId === transaction.transactionId) return this.journal;
     if (this.journalInitialization) return this.journalInitialization;
     const pending = (async () => {
+      const durable = typeof navigator !== 'undefined' && typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory === 'function';
+      const key = durable
+        ? await getJournalKey()
+        : crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
       const storage = await this.journalFactory(this.workspaceBinding, transaction.transactionId);
-      const key = typeof navigator === 'undefined' || typeof (navigator.storage as unknown as { getDirectory?: unknown } | undefined)?.getDirectory !== 'function'
-        ? crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
-        : undefined;
-      const journal = key ? await MutationJournal.begin(transaction.transactionId, storage, key) : await MutationJournal.begin(transaction.transactionId, storage);
+      const journal = await MutationJournal.begin(transaction.transactionId, storage, key);
       this.journal = journal; this.journalTransactionId = transaction.transactionId;
       return journal;
     })();

@@ -57,7 +57,7 @@ describe('MutationJournal', () => {
       journal.record({ path: 'one.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 }),
       journal.record({ path: 'two.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 }),
     ]);
-    expect(await storage.list()).toEqual(['entry-1.bin', 'entry-2.bin']);
+    expect((await storage.list()).filter((name) => name.startsWith('entry-'))).toEqual(['entry-1.bin', 'entry-2.bin']);
   });
 
   it('retains the journal and blocks recovery after FSA apply crashes before post-state persistence', async () => {
@@ -82,7 +82,35 @@ describe('MutationJournal', () => {
     )).rejects.toThrow('WORKSPACE_CONFLICT');
     const current = await (await root.getFileHandle('notes.txt')).getFile();
     expect(new TextDecoder().decode(new Uint8Array(await current.arrayBuffer()))).toBe('after!');
-    expect(await storage.list()).toEqual(['entry-1.bin']);
+    expect(await storage.list()).toContain('entry-1.bin');
+  });
+
+  it('rejects tampering with authenticated journal metadata', async () => {
+    // Break caught: unauthenticated allocation metadata lets an attacker forge the only state recovery is allowed to clean without records.
+    const storage = new MemoryJournalStorage();
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    await MutationJournal.begin('txn-metadata-tamper', storage, key);
+
+    await storage.put('journal-metadata.bin', new Uint8Array([1]));
+
+    await expect(MutationJournal.openExisting('txn-metadata-tamper', storage, key)).rejects.toThrow('JOURNAL_TAMPERED');
+  });
+
+  it('rejects a deleted entry after commit has durably reached finished state', async () => {
+    // Break caught: failed directory cleanup must not let a finished marker hide deletion of the rollback record it authenticates.
+    class InterruptedClearStorage extends MemoryJournalStorage {
+      override async clear(): Promise<void> { throw new Error('CLEAR_INTERRUPTED'); }
+    }
+    const storage = new InterruptedClearStorage();
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const journal = await MutationJournal.begin('txn-finished-tamper', storage, key);
+    await journal.record({ path: 'changed.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 });
+    await journal.setExpected('changed.txt', { exists: true, kind: 'file', size: 1, lastModified: 1, sha256: 'finished' });
+    await expect(journal.commit()).rejects.toThrow('CLEAR_INTERRUPTED');
+
+    await storage.remove('entry-1.bin');
+
+    await expect(MutationJournal.openExisting('txn-finished-tamper', storage, key)).rejects.toThrow('JOURNAL_TAMPERED');
   });
 
   it('removes the committed OPFS transaction directory from recovery enumeration', async () => {

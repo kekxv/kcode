@@ -9,12 +9,23 @@ export type JournalOriginal = { exists: boolean; kind?: FileSystemHandleKind; by
 export type JournalRecord = { path: string; operation: JournalEntrySummary['operation']; original: JournalOriginal; expected?: JournalOriginal | null; phase?: 'prepared' | 'applied'; resultingBytes: number };
 export type JournalStorage = { put(name: string, bytes: Uint8Array): Promise<void>; get(name: string): Promise<Uint8Array | null>; remove(name: string): Promise<void>; list(): Promise<string[]>; clear(): Promise<void> };
 type EncryptedRecord = { iv: Uint8Array; ciphertext: Uint8Array };
+type DurableJournalStatus = 'allocated' | 'active' | 'finished';
+type DurableJournalMetadata = {
+  schemaVersion: 1;
+  transactionId: string;
+  status: DurableJournalStatus;
+  outcome: 'committed' | 'rolled-back' | null;
+  entryCount: number;
+  entries: Array<{ id: number; phase: 'prepared' | 'applied'; sha256: string }>;
+};
 
 const encoder = new TextEncoder(); const decoder = new TextDecoder();
 const asBase64 = (value: Uint8Array): string => btoa(String.fromCharCode(...value));
 const fromBase64 = (value: string): Uint8Array => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 const context = (transactionId: string, entryId: number): Uint8Array => encoder.encode(JSON.stringify({ transactionId, entryId, schemaVersion: 1 }));
+const metadataContext = (transactionId: string): Uint8Array => encoder.encode(JSON.stringify({ transactionId, kind: 'journal-metadata', schemaVersion: 1 }));
 const nameFor = (entryId: number): string => `entry-${entryId}.bin`;
+const METADATA_NAME = 'journal-metadata.bin';
 
 /** Minimal durable-storage double used only for tests. */
 export class MemoryJournalStorage implements JournalStorage {
@@ -60,11 +71,7 @@ export class OpfsJournalStorage implements JournalStorage {
     try {
       const journal = await this.workspaceRoot(workspaceId, false); const ids: string[] = [];
       for await (const [name, handle] of (journal as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
-        if (handle.kind !== 'directory' || !this.validId(name)) continue;
-        for await (const _entry of (handle as FileSystemDirectoryHandle as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
-          ids.push(name);
-          break;
-        }
+        if (handle.kind === 'directory' && this.validId(name)) ids.push(name);
       }
       return ids.sort();
     } catch (error) { if (error instanceof DOMException && error.name === 'NotFoundError') return []; throw error; }
@@ -85,8 +92,9 @@ export class OpfsJournalStorage implements JournalStorage {
 /** Encrypted, bounded rollback journal. OPFS adapters supply the durable storage in production. */
 export class MutationJournal {
   private readonly entries: JournalEntrySummary[] = [];
-  private readonly records: Array<{ id: number; record: JournalRecord }> = [];
+  private readonly records: Array<{ id: number; record: JournalRecord; sha256: string }> = [];
   private state: JournalSummary['state'] = 'clean';
+  private durableMetadata: DurableJournalMetadata | null = null;
   private journalBytes = 0;
   private writtenBytes = 0;
   private mutex: Promise<void> = Promise.resolve();
@@ -95,24 +103,34 @@ export class MutationJournal {
   static async begin(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
     if ((await storage.list()).length) throw new Error('JOURNAL_TRANSACTION_EXISTS');
-    return new MutationJournal(transactionId, storage, await key);
+    const journal = new MutationJournal(transactionId, storage, await key);
+    await journal.persistMetadata('allocated', null, []);
+    return journal;
   }
   /** Rehydrates a pre-existing transaction without ever treating its records as a new journal. */
   static async openExisting(transactionId: string, storage: JournalStorage, key: CryptoKey | Promise<CryptoKey> = getJournalKey()): Promise<MutationJournal> {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) throw new Error('INVALID_TRANSACTION_ID');
     const journal = new MutationJournal(transactionId, storage, await key);
-    const names = (await storage.list()).sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-    if (!names.length || names.some((name, index) => name !== nameFor(index + 1))) throw new Error('JOURNAL_TAMPERED');
-    for (let index = 0; index < names.length; index += 1) {
-      const encrypted = await storage.get(names[index]);
+    const metadataBytes = await storage.get(METADATA_NAME);
+    if (!metadataBytes) throw new Error('JOURNAL_TAMPERED');
+    const metadata = await journal.decryptMetadata(metadataBytes);
+    journal.validateMetadata(metadata);
+    const names = await storage.list();
+    const expectedNames = new Set([METADATA_NAME, ...metadata.entries.map(({ id }) => nameFor(id))]);
+    if (names.length !== expectedNames.size || names.some((name) => !expectedNames.has(name))) throw new Error('JOURNAL_TAMPERED');
+    for (const stateEntry of metadata.entries) {
+      const encrypted = await storage.get(nameFor(stateEntry.id));
       if (!encrypted) throw new Error('JOURNAL_TAMPERED');
-      const record = await journal.decrypt(index + 1, encrypted);
+      if (await journal.hash(encrypted) !== stateEntry.sha256) throw new Error('JOURNAL_TAMPERED');
+      const record = await journal.decrypt(stateEntry.id, encrypted);
       journal.validate(record);
+      if (record.phase !== stateEntry.phase) throw new Error('JOURNAL_TAMPERED');
       const original = record.original.bytes ?? new Uint8Array();
-      journal.records.push({ id: index + 1, record });
+      journal.records.push({ id: stateEntry.id, record, sha256: stateEntry.sha256 });
       journal.entries.push({ path: record.path, operation: record.operation, originalBytes: original.byteLength, resultingBytes: record.resultingBytes });
       journal.journalBytes += encrypted.byteLength; journal.writtenBytes += record.resultingBytes;
     }
+    journal.durableMetadata = metadata;
     journal.state = 'needs-rollback';
     return journal;
   }
@@ -130,8 +148,10 @@ export class MutationJournal {
     const normalized: JournalRecord = { ...record, phase: 'prepared', expected: null, original: { ...record.original, bytes: original } };
     const encrypted = await this.encrypt(id, normalized);
     if (this.journalBytes + encrypted.byteLength > MAX_JOURNAL_TRANSACTION_BYTES) throw new Error('JOURNAL_TRANSACTION_LIMIT');
+    const stored = { id, record: normalized, sha256: await this.hash(encrypted) };
     await this.storage.put(nameFor(id), encrypted);
-    this.records.push({ id, record: normalized });
+    await this.persistMetadata('active', null, [...this.records, stored]);
+    this.records.push(stored);
     this.entries.push({ path: record.path, operation: record.operation, originalBytes: original.byteLength, resultingBytes: record.resultingBytes });
     this.journalBytes += encrypted.byteLength; this.writtenBytes += record.resultingBytes; this.state = 'dirty';
   }
@@ -141,12 +161,17 @@ export class MutationJournal {
   private async setExpectedUnlocked(path: string, expected: JournalOriginal): Promise<void> {
     const entry = this.records.find((candidate) => candidate.record.path === path);
     if (!entry || this.state === 'clean' || this.state === 'conflict') throw new Error('JOURNAL_EXPECTED_STATE_INVALID');
-    entry.record.phase = 'applied';
-    entry.record.expected = { ...expected, bytes: undefined };
-    await this.storage.put(nameFor(entry.id), await this.encrypt(entry.id, entry.record));
+    const updatedRecord: JournalRecord = { ...entry.record, phase: 'applied', expected: { ...expected, bytes: undefined } };
+    const encrypted = await this.encrypt(entry.id, updatedRecord);
+    const updatedEntry = { id: entry.id, record: updatedRecord, sha256: await this.hash(encrypted) };
+    const updatedRecords = this.records.map((candidate) => candidate.id === entry.id ? updatedEntry : candidate);
+    await this.storage.put(nameFor(entry.id), encrypted);
+    await this.persistMetadata('active', null, updatedRecords);
+    entry.record = updatedRecord;
+    entry.sha256 = updatedEntry.sha256;
   }
 
-  async commit(): Promise<void> { await this.serialized(async () => { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.storage.clear(); this.state = 'clean'; }); }
+  async commit(): Promise<void> { await this.serialized(async () => { if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT'); await this.readDurableRecords(); await this.persistMetadata('finished', 'committed', this.records); await this.storage.clear(); this.state = 'clean'; }); }
   async rollback(
     verifyOrRestore: ((path: string, expected: JournalOriginal) => Promise<boolean | void>) | ((path: string, original: JournalOriginal) => Promise<void>),
     maybeRestore?: (path: string, original: JournalOriginal) => Promise<void>,
@@ -158,10 +183,10 @@ export class MutationJournal {
     if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
     const verify = maybeRestore ? verifyOrRestore as (path: string, expected: JournalOriginal) => Promise<boolean | void> : async () => true;
     const restore = maybeRestore ?? verifyOrRestore as (path: string, original: JournalOriginal) => Promise<void>;
-    const records: JournalRecord[] = [];
-    for (const { id } of this.records) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); records.push(await this.decrypt(id, encrypted)); }
+    const records = await this.readDurableRecords();
     for (const record of records) if (maybeRestore && (!record.expected || await verify(record.path, record.expected) === false)) { this.state = 'conflict'; throw new Error('WORKSPACE_CONFLICT'); }
     for (const record of records.reverse()) await restore(record.path, record.original);
+    await this.persistMetadata('finished', 'rolled-back', this.records);
     await this.storage.clear(); this.state = 'clean';
   }
 
@@ -173,8 +198,10 @@ export class MutationJournal {
   ): Promise<'recovered'> {
     return this.serialized<'recovered'>(async () => {
       if (this.state === 'conflict') throw new Error('WORKSPACE_CONFLICT');
-      const records: JournalRecord[] = [];
-      for (const { id } of this.records) { const encrypted = await this.storage.get(nameFor(id)); if (!encrypted) throw new Error('JOURNAL_TAMPERED'); records.push(await this.decrypt(id, encrypted)); }
+      const records = await this.readDurableRecords();
+      if (this.durableMetadata?.status === 'allocated' || this.durableMetadata?.status === 'finished') {
+        await this.storage.clear(); this.state = 'clean'; return 'recovered';
+      }
       const pending = records.filter((record) => record.phase !== 'applied' || !record.expected);
       if (pending.length) {
         const originalsMatch = await Promise.all(pending.map((record) => matchesOriginal(record.path, record.original)));
@@ -187,6 +214,7 @@ export class MutationJournal {
         this.state = 'conflict'; throw new Error('WORKSPACE_CONFLICT');
       }
       for (const record of records.reverse()) await restore(record.path, record.original);
+      await this.persistMetadata('finished', 'rolled-back', this.records);
       await this.storage.clear(); this.state = 'clean';
       return 'recovered';
     });
@@ -207,6 +235,74 @@ export class MutationJournal {
       const decode = (snapshot: (Omit<JournalOriginal, 'bytes'> & { bytes: string }) | null | undefined): JournalOriginal | null => snapshot ? { ...snapshot, bytes: fromBase64(snapshot.bytes) } : null;
       return { ...parsedRecord, original: decode(parsedRecord.original)!, expected: decode(parsedRecord.expected) };
     } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
+  }
+  private async persistMetadata(status: DurableJournalStatus, outcome: DurableJournalMetadata['outcome'], records: typeof this.records): Promise<void> {
+    const metadata: DurableJournalMetadata = {
+      schemaVersion: 1,
+      transactionId: this.transactionId,
+      status,
+      outcome,
+      entryCount: records.length,
+      entries: records.map(({ id, record, sha256 }) => ({ id, phase: record.phase ?? 'prepared', sha256 })),
+    };
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource, additionalData: metadataContext(this.transactionId) as unknown as BufferSource },
+      this.key,
+      encoder.encode(JSON.stringify(metadata)),
+    ));
+    await this.storage.put(METADATA_NAME, encoder.encode(JSON.stringify({ iv: asBase64(iv), ciphertext: asBase64(ciphertext) })));
+    this.durableMetadata = metadata;
+  }
+  private async decryptMetadata(bytes: Uint8Array): Promise<DurableJournalMetadata> {
+    try {
+      const parsed = JSON.parse(decoder.decode(bytes)) as { iv: string; ciphertext: string };
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: fromBase64(parsed.iv) as unknown as BufferSource, additionalData: metadataContext(this.transactionId) as unknown as BufferSource },
+        this.key,
+        fromBase64(parsed.ciphertext) as unknown as BufferSource,
+      );
+      return JSON.parse(decoder.decode(plaintext)) as DurableJournalMetadata;
+    } catch { this.state = 'conflict'; throw new Error('JOURNAL_TAMPERED'); }
+  }
+  private validateMetadata(metadata: DurableJournalMetadata): void {
+    if (!metadata || metadata.schemaVersion !== 1 || metadata.transactionId !== this.transactionId
+      || !['allocated', 'active', 'finished'].includes(metadata.status)
+      || !Number.isSafeInteger(metadata.entryCount) || metadata.entryCount < 0
+      || !Array.isArray(metadata.entries) || metadata.entries.length !== metadata.entryCount
+      || metadata.entries.some((entry, index) => entry?.id !== index + 1
+        || (entry.phase !== 'prepared' && entry.phase !== 'applied')
+        || typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha256))
+      || (metadata.status === 'allocated' && (metadata.entryCount !== 0 || metadata.outcome !== null))
+      || (metadata.status === 'active' && (metadata.entryCount === 0 || metadata.outcome !== null))
+      || (metadata.status === 'finished' && metadata.outcome !== 'committed' && metadata.outcome !== 'rolled-back')) throw new Error('JOURNAL_TAMPERED');
+  }
+  private async readDurableRecords(): Promise<JournalRecord[]> {
+    const metadataBytes = await this.storage.get(METADATA_NAME);
+    if (!metadataBytes) throw new Error('JOURNAL_TAMPERED');
+    const metadata = await this.decryptMetadata(metadataBytes);
+    this.validateMetadata(metadata);
+    if (!this.sameMetadata(metadata, this.durableMetadata)) throw new Error('JOURNAL_TAMPERED');
+    const names = await this.storage.list();
+    const expectedNames = new Set([METADATA_NAME, ...metadata.entries.map(({ id }) => nameFor(id))]);
+    if (names.length !== expectedNames.size || names.some((name) => !expectedNames.has(name))) throw new Error('JOURNAL_TAMPERED');
+    const records: JournalRecord[] = [];
+    for (const stateEntry of metadata.entries) {
+      const encrypted = await this.storage.get(nameFor(stateEntry.id));
+      if (!encrypted || await this.hash(encrypted) !== stateEntry.sha256) throw new Error('JOURNAL_TAMPERED');
+      const record = await this.decrypt(stateEntry.id, encrypted);
+      this.validate(record);
+      if (record.phase !== stateEntry.phase) throw new Error('JOURNAL_TAMPERED');
+      records.push(record);
+    }
+    return records;
+  }
+  private sameMetadata(left: DurableJournalMetadata, right: DurableJournalMetadata | null): boolean {
+    return right !== null && JSON.stringify(left) === JSON.stringify(right);
+  }
+  private async hash(bytes: Uint8Array): Promise<string> {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
   }
   private validate(record: JournalRecord): void {
     if (!record || typeof record.path !== 'string' || record.path.split('/').some((part) => !part || part === '.' || part === '..')

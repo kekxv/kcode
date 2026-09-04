@@ -156,8 +156,8 @@ describe('P9Server lifecycle', () => {
     }
   });
 
-  it('distinguishes an empty pre-record OPFS directory from a nonempty malformed journal during recovery', async () => {
-    // Break caught: a key-store failure after OPFS open leaves an empty transaction directory that permanently blocks workspace attachment as tampered.
+  it('does not allocate OPFS journal storage before the journal key is available', async () => {
+    // Break caught: a key-store failure after OPFS allocation leaves an unauthenticated empty directory that recovery cannot safely distinguish from tampering.
     const opfsRoot = new MemoryFsaRoot();
     const workspace = new MemoryFsaRoot();
     vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
@@ -171,13 +171,80 @@ describe('P9Server lifecycle', () => {
       await interrupted.handle(frame(MESSAGE.Tlcreate, 3, new Writer().u32(0).string('never-created.txt').u32(0).u32(0).u32(0).finish()), (reply) => replies.push(reply));
 
       expect(replies.at(-1)![4]).toBe(MESSAGE.Rlerror);
-      expect(await (await OpfsJournalStorage.openExisting('default', 'key-failure')).list()).toEqual([]);
+      await expect(OpfsJournalStorage.openExisting('default', 'key-failure')).rejects.toMatchObject({ name: 'NotFoundError' });
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual([]);
 
       vi.stubGlobal('indexedDB', indexedDB);
       await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).resolves.toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
+  it('cleans an authenticated journal allocation that has no mutation records', async () => {
+    // Break caught: recovery must recognize the durable authenticated allocation state instead of treating every pre-record directory as safe or tampered.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspace = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', indexedDB);
+    try {
+      await MutationJournal.begin('allocated-only', await OpfsJournalStorage.open('default', 'allocated-only'));
+
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['allocated-only']);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).resolves.toBeUndefined();
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an arbitrary empty transaction directory during recovery', async () => {
+    // Break caught: skipping an unauthenticated empty directory lets deletion of all durable journal files erase evidence of an unfinished mutation.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspace = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', indexedDB);
+    try {
+      await OpfsJournalStorage.open('default', 'arbitrary-empty');
+
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['arbitrary-empty']);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).rejects.toThrow('JOURNAL_TAMPERED');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an applied OPFS journal whose only encrypted entry is deleted', async () => {
+    // Break caught: deleting the sole entry must not turn an authenticated unfinished transaction into an ignored empty directory.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspace = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', indexedDB);
+    try {
+      const storage = await OpfsJournalStorage.open('default', 'deleted-entry');
+      const journal = await MutationJournal.begin('deleted-entry', storage);
+      await journal.record({ path: 'changed.txt', operation: 'create', original: { exists: false }, resultingBytes: 1 });
+      await journal.setExpected('changed.txt', { exists: true, kind: 'file', size: 1, lastModified: 1, sha256: 'deleted' });
+
+      await storage.remove('entry-1.bin');
+
+      await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['deleted-entry']);
+      await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).rejects.toThrow('JOURNAL_TAMPERED');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects nonempty malformed journal storage during recovery', async () => {
+    // Break caught: a non-record file in a transaction directory must not be interpreted as recoverable authenticated journal state.
+    const opfsRoot = new MemoryFsaRoot();
+    const workspace = new MemoryFsaRoot();
+    vi.stubGlobal('navigator', { storage: { getDirectory: async () => opfsRoot } });
+    vi.stubGlobal('indexedDB', indexedDB);
+    try {
       const malformed = await OpfsJournalStorage.open('default', 'malformed-journal');
       await malformed.put('unexpected.bin', new Uint8Array([1]));
+
       await expect(OpfsJournalStorage.transactionIds('default')).resolves.toEqual(['malformed-journal']);
       await expect(new P9Server().setRoot(workspace as unknown as FileSystemDirectoryHandle)).rejects.toThrow('JOURNAL_TAMPERED');
     } finally {
