@@ -37,6 +37,8 @@ class FakeRuntime {
   async commitTransaction(): Promise<void> { this.transaction = null; }
   async rollbackTransaction(): Promise<void> { this.transaction = null; }
   serialSend(command: string): void { this.sent.push(command); }
+  resetCommandSerialBudget(): void {}
+  journalSummary(transactionId: string) { return { transactionId, state: 'clean' as const, entries: [], journalBytes: 0, writtenBytes: 0 }; }
 
   destroy(): void {
     this.destroyed = true;
@@ -78,7 +80,41 @@ describe('vm.worker lifecycle correlation', () => {
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
     FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
     worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
-    expect(FakeRuntime.instances[0].sent).toEqual(['cd /work && pwd\n']);
+    expect(FakeRuntime.instances[0].sent).toHaveLength(1);
+    expect(FakeRuntime.instances[0].sent[0]).toContain('cd /work && exec /bin/sh');
+  });
+
+  it('permits journal finalization but never a second command after disposal destroys v86', async () => {
+    // Break caught: keeping the journal object after a terminal event must not accidentally retain an emulator usable for a second shell process.
+    const postMessage = vi.fn();
+    const close = vi.fn();
+    class TestDirectoryHandle {}
+    vi.stubGlobal('self', { postMessage, close, onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    const writeSession = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } as const;
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session: writeSession } } as MessageEvent);
+    const active = FakeRuntime.instances[0];
+    active.resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' }));
+    worker.onmessage?.({ data: { kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_1' } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'begin' }));
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'first', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
+    const nonce = active.sent[0].match(/KCODE_BEGIN:([^\\]+)\\037/)?.[1];
+    active.emit(`\x1eKCODE_BEGIN:${nonce}\x1f\x1eKCODE_END:${nonce}:0\x1f`);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_RESULT', requestId: 'first' })));
+    expect(active.destroyed).toBe(true);
+
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'second', command: 'id', timeoutMs: 30_000 } } as MessageEvent);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'second', code: 'VM_RUNTIME_NOT_READY' }));
+
+    worker.onmessage?.({ data: { kind: 'VM_COMMIT_TRANSACTION', requestId: 'commit' } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'commit' }));
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('keeps the newest VM session correlated after readiness and ignores a superseded boot', async () => {
@@ -103,7 +139,7 @@ describe('vm.worker lifecycle correlation', () => {
     expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'old', kind: 'VM_ERROR' }));
 
     newRuntime.emit('KCODE_AFTER_READY');
-    expect(postMessage).toHaveBeenLastCalledWith({ kind: 'VM_OUTPUT_DELTA', requestId: 'new', delta: 'KCODE_AFTER_READY' });
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_OUTPUT_DELTA', requestId: 'new' }));
     expect(close).not.toHaveBeenCalled();
   });
 

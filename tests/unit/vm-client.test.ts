@@ -16,18 +16,17 @@ class FakeWorker {
 }
 
 describe('VMClient', () => {
-  it('resolves only the matching worker terminal event', async () => {
-    // Break caught: accepting a result for another RPC request can cross command outputs.
+  it('rejects a second execution while the disposable VM is busy', async () => {
+    // Break caught: concurrent shell requests can cross serial framing and make two hostile guest processes share one containment boundary.
     const worker = new FakeWorker();
     const client = new VMClient(() => worker as unknown as Worker);
     const first = client.exec('pwd', { timeoutMs: 120_000 });
-    const second = client.exec('id', { timeoutMs: 120_000 });
-    const [firstRequest, secondRequest] = worker.posted as Array<{ requestId: string }>;
+    await expect(client.exec('id', { timeoutMs: 120_000 })).rejects.toThrow('VM_EXEC_BUSY');
+    const [firstRequest] = worker.posted as Array<{ requestId: string }>;
 
-    worker.emit({ kind: 'VM_RESULT', requestId: secondRequest.requestId, output: 'uid=1000', exitCode: 0 });
-    await expect(second).resolves.toEqual({ output: 'uid=1000', exitCode: 0 });
-    worker.emit({ kind: 'VM_RESULT', requestId: firstRequest.requestId, output: '/workspace', exitCode: 0 });
-    await expect(first).resolves.toEqual({ output: '/workspace', exitCode: 0 });
+    const result = (requestId: string, output: string) => ({ kind: 'VM_RESULT' as const, requestId, output, exitCode: 0, truncated: false, durationMs: 1, transactionId: 'tx_1', journalSummary: { transactionId: 'tx_1', state: 'clean' as const, entries: [], journalBytes: 0, writtenBytes: 0 } });
+    worker.emit(result(firstRequest.requestId, '/workspace'));
+    await expect(first).resolves.toEqual({ output: '/workspace', exitCode: 0, truncated: false, durationMs: 1, transactionId: 'tx_1', journalSummary: { transactionId: 'tx_1', state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 } });
   });
 
   it('rejects all pending calls when the worker crashes', async () => {

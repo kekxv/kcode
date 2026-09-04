@@ -5,6 +5,7 @@ import { P9CodecSession, P9DecodeError, Writer, toSafeBrowserNumber, unknownRequ
 import { FsaBackend, P9Error } from './fsa-backend';
 import { MemoryJournalStorage, MutationJournal, OpfsJournalStorage, type JournalOriginal, type JournalRecord, type JournalStorage } from './mutation-journal';
 import type { P9Request, P9Response, Qid } from './types';
+import type { JournalSummary } from './mutation-journal';
 
 export type TransactionPolicy = { transactionId: string; capabilities: readonly WorkspaceCapability[] };
 type JournalFactory = (workspaceBinding: string, transactionId: string) => Promise<JournalStorage>;
@@ -62,6 +63,10 @@ export class P9Server {
     } finally { this.transactionFinalizing = false; }
   }
   async recoverTransaction(): Promise<void> { await this.rollbackTransaction(); }
+  journalSummary(transactionId: string): JournalSummary {
+    if (this.journal && this.journalTransactionId === transactionId) return this.journal.summary();
+    return { transactionId, state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 };
+  }
 
   async handle(frame: Uint8Array, reply: (response: Uint8Array) => void): Promise<void> {
     if (this.inFlight >= MAX_IN_FLIGHT) { this.replyRaw(frame, { type: 'Rlerror', tag: this.tag(frame), errno: ERRNO.EBUSY }, reply); return; }

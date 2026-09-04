@@ -4,6 +4,7 @@ import {
   isValidWorkspaceSession,
   WorkspaceSessionAuthorizer,
 } from '../security/capabilities';
+import type { JournalSummary } from '../worker/p9/mutation-journal';
 
 export type WorkspaceCapability = 'read' | 'write' | 'delete';
 
@@ -78,13 +79,17 @@ export type VMRequest =
 export type VMEvent =
   | { kind: 'VM_READY'; requestId: string }
   | { kind: 'VM_OUTPUT_DELTA'; requestId: string; delta: string }
-  | { kind: 'VM_RESULT'; requestId: string; output: string; exitCode: number }
+  | { kind: 'VM_HEARTBEAT'; requestId: string }
+  | { kind: 'VM_RESULT'; requestId: string; output: string; exitCode: number; truncated: boolean; durationMs: number; transactionId: string; journalSummary: JournalSummary }
   | { kind: 'VM_ERROR'; requestId: string; code: string; message: string };
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_PORT_BYTES = 384 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
 const MAX_VM_SERIAL_DELTA_BYTES = 64 * 1024;
+const MAX_VM_COMMAND_BYTES = 32 * 1024;
+const MIN_VM_TIMEOUT_MS = 1_000;
+const MAX_VM_TIMEOUT_MS = 600_000;
 const encoder = new TextEncoder();
 
 type RecordValue = Record<string, unknown>;
@@ -206,9 +211,10 @@ export const isVMRequest = (value: unknown): value is VMRequest => {
       return hasExactKeys(value, ['kind', 'requestId', 'handle']) && isDirectoryHandle(value.handle);
     case 'VM_EXEC':
       return hasExactKeys(value, ['kind', 'requestId', 'command', 'timeoutMs'])
-        && bytesAtMost(value.command, MAX_PORT_BYTES)
+        && bytesAtMost(value.command, MAX_VM_COMMAND_BYTES)
         && isFiniteInteger(value.timeoutMs)
-        && value.timeoutMs > 0;
+        && value.timeoutMs >= MIN_VM_TIMEOUT_MS
+        && value.timeoutMs <= MAX_VM_TIMEOUT_MS;
     case 'VM_BEGIN_TRANSACTION':
       return hasExactKeys(value, ['kind', 'requestId', 'transactionId']) && isId(value.transactionId);
     case 'VM_COMMIT_TRANSACTION':
@@ -238,10 +244,17 @@ export const isVMEvent = (value: unknown): value is VMEvent => {
       return hasExactKeys(value, ['kind', 'requestId']);
     case 'VM_OUTPUT_DELTA':
       return hasExactKeys(value, ['kind', 'requestId', 'delta']) && bytesAtMost(value.delta, MAX_VM_SERIAL_DELTA_BYTES);
+    case 'VM_HEARTBEAT':
+      return hasExactKeys(value, ['kind', 'requestId']);
     case 'VM_RESULT':
-      return hasExactKeys(value, ['kind', 'requestId', 'output', 'exitCode'])
+      return hasExactKeys(value, ['kind', 'requestId', 'output', 'exitCode', 'truncated', 'durationMs', 'transactionId', 'journalSummary'])
         && bytesAtMost(value.output, MAX_PORT_BYTES)
-        && isFiniteInteger(value.exitCode);
+        && isFiniteInteger(value.exitCode)
+        && typeof value.truncated === 'boolean'
+        && isFiniteInteger(value.durationMs)
+        && value.durationMs >= 0
+        && isId(value.transactionId)
+        && isJournalSummary(value.journalSummary, value.transactionId);
     case 'VM_ERROR':
       return hasExactKeys(value, ['kind', 'requestId', 'code', 'message'])
         && isId(value.code)
@@ -250,5 +263,20 @@ export const isVMEvent = (value: unknown): value is VMEvent => {
       return false;
   }
 };
+
+const isJournalSummary = (value: unknown, transactionId: string): value is JournalSummary =>
+  isRecord(value)
+  && hasExactKeys(value, ['transactionId', 'state', 'entries', 'journalBytes', 'writtenBytes'])
+  && value.transactionId === transactionId
+  && (value.state === 'clean' || value.state === 'dirty' || value.state === 'needs-rollback' || value.state === 'conflict')
+  && Array.isArray(value.entries)
+  && value.entries.every((entry) => isRecord(entry)
+    && hasExactKeys(entry, ['path', 'operation', 'originalBytes', 'resultingBytes'])
+    && typeof entry.path === 'string' && bytesAtMost(entry.path, MAX_PORT_BYTES)
+    && (entry.operation === 'create' || entry.operation === 'write' || entry.operation === 'delete' || entry.operation === 'rename')
+    && isFiniteInteger(entry.originalBytes) && entry.originalBytes >= 0
+    && isFiniteInteger(entry.resultingBytes) && entry.resultingBytes >= 0)
+  && isFiniteInteger(value.journalBytes) && value.journalBytes >= 0
+  && isFiniteInteger(value.writtenBytes) && value.writtenBytes >= 0;
 
 export const createRequestId = (): string => crypto.randomUUID();

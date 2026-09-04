@@ -2,13 +2,17 @@ import { WorkspaceSessionAuthorizer } from '../security/capabilities';
 import { isAuthorizedVMRequest, isVMRequest, type VMEvent } from '../types/protocol';
 import { WorkspaceStore } from '../utils/idb-store';
 import { V86Runtime } from './v86-runtime';
+import { ExecController } from './exec-controller';
 
 const authorizer = new WorkspaceSessionAuthorizer();
 const workspaceStore = new WorkspaceStore();
 let runtime: V86Runtime | null = null;
-let serialRequestId: string | null = null;
 let lifecycleGeneration = 0;
 let workspaceAttached = false;
+let activeTransactionId: string | null = null;
+let execution: { requestId: string; controller: ExecController; heartbeat: ReturnType<typeof setInterval> } | null = null;
+let outputLimit: (() => void) | null = null;
+let emulatorDisposed = false;
 
 const send = (event: VMEvent): void => self.postMessage(event);
 const fail = (requestId: string, code: string, message: string): void =>
@@ -16,8 +20,12 @@ const fail = (requestId: string, code: string, message: string): void =>
 const clearRuntime = (): void => {
   runtime?.destroy();
   runtime = null;
-  serialRequestId = null;
+  if (execution) clearInterval(execution.heartbeat);
+  execution = null;
+  outputLimit = null;
+  emulatorDisposed = false;
   workspaceAttached = false;
+  activeTransactionId = null;
   authorizer.clear();
 };
 const invalidateRuntime = (): number => {
@@ -38,21 +46,10 @@ async function dispatch(value: unknown): Promise<void> {
   const { requestId } = value;
   if (value.kind === 'VM_INIT') {
     const generation = invalidateRuntime();
-    serialRequestId = requestId;
     try {
       const session = authorizer.activate(value.session);
       runtime = new V86Runtime({
-        onOutputLimit: () => {
-          if (!isCurrent(generation)) return;
-          const outputRequestId = serialRequestId;
-          if (outputRequestId) fail(outputRequestId, 'VM_OUTPUT_LIMIT', 'VM serial output exceeded 8 MiB.');
-          invalidateRuntime();
-          self.close();
-        },
-      });
-      runtime.onSerial((delta) => {
-        const requestIdForDelta = serialRequestId;
-        if (isCurrent(generation) && requestIdForDelta) send({ kind: 'VM_OUTPUT_DELTA', requestId: requestIdForDelta, delta });
+        onOutputLimit: () => outputLimit?.(),
       });
       // A snapshot is captured before any selected directory exists. Workspace
       // sessions cold-boot so their 9P device and serial shell are live before
@@ -97,9 +94,11 @@ async function dispatch(value: unknown): Promise<void> {
     return;
   }
   if (value.kind === 'VM_CANCEL') {
-    invalidateRuntime();
-    fail(requestId, 'VM_CANCELLED', 'The VM command was cancelled.');
-    self.close();
+    const current = execution;
+    if (current?.requestId === value.targetRequestId) current.controller.cancel();
+    // Unknown IDs are intentionally successful and must not be able to
+    // destroy a later execution by request-id guessing.
+    send({ kind: 'VM_READY', requestId });
     return;
   }
   if (value.kind === 'VM_BEGIN_TRANSACTION' || value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') {
@@ -112,28 +111,58 @@ async function dispatch(value: unknown): Promise<void> {
         const capabilities = authorizer.transactionCapabilities();
         if (!capabilities) throw new Error('VM_UNAUTHORIZED_REQUEST');
         runtime.beginTransaction(value.transactionId, capabilities);
+        activeTransactionId = value.transactionId;
       } else if (value.kind === 'VM_COMMIT_TRANSACTION') {
         await runtime.commitTransaction();
+        activeTransactionId = null;
       } else {
         await runtime.rollbackTransaction();
+        activeTransactionId = null;
       }
       send({ kind: 'VM_READY', requestId });
+      if ((value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') && !execution) {
+        clearRuntime();
+        self.close();
+      }
     } catch {
       fail(requestId, 'VM_TRANSACTION_FAILED', 'The workspace transaction could not be completed.');
     }
     return;
   }
-  if (!runtime) {
+  if (!runtime || execution || emulatorDisposed) {
     fail(requestId, 'VM_RUNTIME_NOT_READY', 'The Linux runtime is not ready.');
     return;
   }
-  // Task 8 adds framed completion/exit status. Until then, serial input remains
-  // available so the verified runtime can be smoke-tested through this Worker.
-  serialRequestId = requestId;
-  try {
-    // The selected FSA directory is intentionally the only guest work area.
-    runtime.serialSend(`cd /work && ${value.command}\n`);
-  } catch {
-    fail(requestId, 'VM_SERIAL_SEND_FAILED', 'The Linux runtime rejected serial input.');
-  }
+  const executionRuntime = runtime;
+  executionRuntime.resetCommandSerialBudget();
+  const controller = new ExecController(executionRuntime, {
+    onOutput: (delta) => {
+      if (isCurrentRuntime(lifecycleGeneration, executionRuntime) && execution?.requestId === requestId) {
+        send({ kind: 'VM_OUTPUT_DELTA', requestId, delta });
+      }
+    },
+    journalSummary: (transactionId) => executionRuntime.journalSummary(transactionId),
+  });
+  const heartbeat = setInterval(() => {
+    if (isCurrentRuntime(lifecycleGeneration, executionRuntime) && execution?.requestId === requestId) send({ kind: 'VM_HEARTBEAT', requestId });
+  }, 1_000);
+  execution = { requestId, controller, heartbeat };
+  outputLimit = () => controller.outputLimit();
+  const generation = lifecycleGeneration;
+  void controller.exec(value.command, value.timeoutMs, activeTransactionId ?? 'no_transaction').then((result) => {
+    if (!isCurrentRuntime(generation, executionRuntime) || execution?.requestId !== requestId) return;
+    clearInterval(heartbeat);
+    execution = null;
+    outputLimit = null;
+    emulatorDisposed = true;
+    send({ kind: 'VM_RESULT', requestId, ...result });
+  }).catch((error: unknown) => {
+    if (!isCurrentRuntime(generation, executionRuntime) || execution?.requestId !== requestId) return;
+    clearInterval(heartbeat);
+    execution = null;
+    outputLimit = null;
+    emulatorDisposed = true;
+    const code = error instanceof Error ? error.message : 'VM_EXEC_FAILED';
+    fail(requestId, code, 'The disposable Linux execution ended without a result.');
+  });
 }

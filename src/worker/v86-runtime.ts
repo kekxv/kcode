@@ -1,5 +1,6 @@
 import { V86, type V86Options } from 'v86';
 import { P9Server, type TransactionPolicy } from './p9/server';
+import type { JournalSummary } from './p9/mutation-journal';
 
 export const VM_MEMORY_BYTES = 256 * 1024 * 1024;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
@@ -121,10 +122,15 @@ export class V86Runtime {
     this.p9Server.setTransactionPolicy(null);
   }
 
+  journalSummary(transactionId: string): JournalSummary { return this.p9Server.journalSummary(transactionId); }
+
   serialSend(data: string): void {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
     this.emulator.serial0_send(data);
   }
+
+  /** Execution framing owns the per-command eight MiB output budget, not boot chatter. */
+  resetCommandSerialBudget(): void { this.totalSerialBytes = 0; }
 
   onSerial(listener: (delta: string) => void): () => void {
     this.serialListeners.add(listener);
