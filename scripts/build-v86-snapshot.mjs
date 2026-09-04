@@ -45,47 +45,70 @@ if (!address || typeof address === 'string') throw new Error('failed to start lo
 let browser;
 try {
   browser = await chromium.launch();
-  const page = await browser.newPage();
   const origin = `http://127.0.0.1:${address.port}`;
-  await page.goto(`${origin}/snapshot.html`);
-  const state = await page.evaluate(async ({ base, memory }) => {
-    const { V86 } = await import('/libv86.mjs');
-    const captureState = async () => {
-      // v86 observes host clock/randomness. Reset all three deterministic
-      // sources for each fresh VM, then prove equal state below.
+  const captureFreshState = async () => {
+    // A new context gives each capture a fresh module registry. The init
+    // script runs before the page and, critically, before libv86 is imported.
+    const context = await browser.newContext();
+    await context.addInitScript(() => {
+      const RealDate = Date;
+      class FixedDate extends RealDate {
+        constructor(...args) {
+          super(...(args.length === 0 ? [0] : args));
+        }
+        static now() { return 0; }
+      }
+      Object.defineProperty(globalThis, 'Date', { configurable: true, value: FixedDate });
+      Object.defineProperty(Math, 'random', { configurable: true, value: () => 0.5 });
       let performanceTicks = 0;
-      Date.now = () => 0;
-      Math.random = () => 0.5;
       Object.defineProperty(performance, 'now', { configurable: true, value: () => performanceTicks++ });
-      const vm = new V86({
-        wasm_path: `${base}/v86/v86.wasm`, bios: { url: `${base}/v86/seabios.bin` },
-        vga_bios: { url: `${base}/v86/vgabios.bin` }, bzimage: { url: `${base}/v86/vmlinuz-virt` },
-        initrd: { url: `${base}/v86/kcode-initramfs` }, cmdline: 'console=ttyS0',
-        memory_size: memory, autostart: true, filesystem: {},
-      });
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('KCODE_GUEST_READY timeout')), 30_000);
-        vm.add_listener('serial0-output-byte', (() => {
-          let output = '';
-          return (byte) => {
-            output += String.fromCharCode(byte);
-            if (output.includes('KCODE_GUEST_READY')) { clearTimeout(timer); resolve(); }
-            if (output.length > 1024) output = output.slice(-1024);
-          };
-        })());
-      });
-      const saved = await vm.save_state();
-      await vm.destroy();
-      return new Uint8Array(saved);
-    };
-    const first = await captureState();
-    const second = await captureState();
-    if (first.length !== second.length || first.some((byte, index) => byte !== second[index])) {
-      throw new Error('two fresh snapshots differ; refusing non-reproducible output');
+      if (globalThis.crypto) {
+        Object.defineProperty(crypto, 'getRandomValues', {
+          configurable: true,
+          value: (values) => {
+            if (values && 'fill' in values) values.fill(0);
+            return values;
+          },
+        });
+        Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: () => '00000000-0000-4000-8000-000000000000' });
+      }
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${origin}/snapshot.html`);
+      return await page.evaluate(async ({ base, memory }) => {
+        const { V86 } = await import('/libv86.mjs');
+        const vm = new V86({
+          wasm_path: `${base}/v86/v86.wasm`, bios: { url: `${base}/v86/seabios.bin` },
+          vga_bios: { url: `${base}/v86/vgabios.bin` }, bzimage: { url: `${base}/v86/vmlinuz-virt` },
+          initrd: { url: `${base}/v86/kcode-initramfs` }, cmdline: 'console=ttyS0',
+          memory_size: memory, autostart: true, filesystem: {},
+        });
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('KCODE_GUEST_READY timeout')), 30_000);
+          vm.add_listener('serial0-output-byte', (() => {
+            let output = '';
+            return (byte) => {
+              output += String.fromCharCode(byte);
+              if (output.includes('KCODE_GUEST_READY')) { clearTimeout(timer); resolve(); }
+              if (output.length > 1024) output = output.slice(-1024);
+            };
+          })());
+        });
+        const saved = await vm.save_state();
+        await vm.destroy();
+        return Array.from(new Uint8Array(saved));
+      }, { base: origin, memory: 128 * 1024 * 1024 });
+    } finally {
+      await context.close();
     }
-    return Array.from(first);
-  }, { base: origin, memory: 128 * 1024 * 1024 });
-  const raw = Uint8Array.from(state);
+  };
+  const first = Uint8Array.from(await captureFreshState());
+  const second = Uint8Array.from(await captureFreshState());
+  if (first.length !== second.length || first.some((byte, index) => byte !== second[index])) {
+    throw new Error('two fresh snapshots differ; refusing non-reproducible output');
+  }
+  const raw = first;
   for (const marker of protectedMarkers) {
     if (Buffer.from(raw).includes(Buffer.from(marker))) throw new Error(`snapshot contains protected marker: ${marker}`);
   }

@@ -1,8 +1,9 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { createServer as createViteServer } from 'vite';
+import { build as viteBuild } from 'vite';
 import { describe, expect, it } from 'vitest';
 import { V86Runtime, VM_MEMORY_BYTES } from '../../src/worker/v86-runtime';
 
@@ -131,66 +132,43 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
     for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']) {
       await fs.access(join(root, 'public/v86', name));
     }
-    const vite = await createViteServer({
-      root,
-      configFile: false,
-      optimizeDeps: { exclude: ['v86'] },
-      plugins: [{
-        name: 'kcode-vm-smoke-worker',
-        configureServer(server) {
-          server.middlewares.use('/smoke-worker.mjs', (_request, response) => {
-            response.setHeader('Content-Type', 'text/javascript');
-            response.end("self.chrome = { runtime: { getURL: (path) => new URL(path, self.location.origin + '/').href } }; import '/src/worker/vm.worker.ts';");
-          });
-        },
-      }],
-      server: { host: '127.0.0.1', port: 0 },
+    await viteBuild({ root, configFile: join(root, 'vite.config.ts') });
+    const workerFile = (await fs.readdir(join(root, 'dist/assets'))).find((name) => /^vm\.worker-.*\.js$/.test(name));
+    if (!workerFile) throw new Error('PACKAGED_VM_WORKER_MISSING');
+    const userDataDirectory = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-smoke-'));
+    const browser = await chromium.launchPersistentContext(userDataDirectory, {
+      headless: false,
+      args: [`--disable-extensions-except=${join(root, 'dist')}`, `--load-extension=${join(root, 'dist')}`],
     });
-    await vite.listen();
-    const origin = vite.resolvedUrls?.local[0]?.replace(/\/$/, '');
-    if (!origin) throw new Error('SMOKE_SERVER_FAILED');
-    const browser = await chromium.launch();
     try {
+      const serviceWorker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker');
+      const extensionOrigin = new URL(serviceWorker.url()).origin;
       const page = await browser.newPage();
-      await page.goto(origin);
-      await expect(page.evaluate(async ({ base, memory }) => {
-        (globalThis as unknown as { chrome: unknown }).chrome = {
-          runtime: { getURL: (path: string) => new URL(path, `${base}/`).href },
-        };
-        await new Promise<void>((resolve, reject) => {
-          const worker = new Worker(`${base}/smoke-worker.mjs`, { type: 'module' });
+      await page.goto(`${extensionOrigin}/src/sidepanel/index.html`);
+      await expect(page.evaluate(async ({ workerFile, memory }) => {
+        return new Promise<string>((resolve, reject) => {
+          const worker = new Worker(chrome.runtime.getURL(`assets/${workerFile}`), { type: 'module' });
           const timer = setTimeout(() => reject(new Error('worker VM_READY timeout')), 30_000);
+          let ready = false;
           worker.onmessage = ({ data }) => {
-            if (data?.kind === 'VM_READY') { clearTimeout(timer); worker.terminate(); resolve(); }
+            if (data?.kind === 'VM_READY' && !ready) {
+              ready = true;
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-smoke', command: 'echo KCODE_SMOKE', timeoutMs: 30_000 });
+              return;
+            }
+            if (ready && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-smoke' && data.delta.includes('KCODE_SMOKE')) {
+              clearTimeout(timer);
+              worker.terminate();
+              resolve(data.delta);
+            }
             if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(data.code)); }
           };
           worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } } });
         });
-        const modulePath = '/src/worker/v86-runtime.ts';
-        const { V86Runtime } = await import(modulePath) as typeof import('../../src/worker/v86-runtime');
-        const runtime = new V86Runtime();
-        const configMemory = memory;
-        if (configMemory !== 128 * 1024 * 1024) throw new Error('unsafe VM memory');
-        const output: string[] = [];
-        runtime.onSerial((delta) => output.push(delta));
-        await runtime.boot();
-        runtime.serialSend('echo KCODE_SMOKE\n');
-        await new Promise<void>((resolve, reject) => {
-          let output = '';
-          const timer = setTimeout(() => reject(new Error('KCODE_SMOKE timeout')), 30_000);
-          const stop = runtime.onSerial((delta) => {
-            output += delta;
-            if (output.includes('KCODE_SMOKE')) { clearTimeout(timer); stop(); resolve(); }
-            if (output.length > 65_536) output = output.slice(-65_536);
-          });
-        });
-        runtime.destroy();
-        if (!output.join('').includes('KCODE_SMOKE')) throw new Error('serial smoke marker missing');
-        return output.join('');
-      }, { base: origin, memory: VM_MEMORY_BYTES })).resolves.toContain('KCODE_SMOKE');
+      }, { workerFile, memory: VM_MEMORY_BYTES })).resolves.toContain('KCODE_SMOKE');
     } finally {
       await browser.close();
-      await vite.close();
+      await fs.rm(userDataDirectory, { recursive: true, force: true });
     }
   }, 60_000);
 });

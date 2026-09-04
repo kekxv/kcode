@@ -84,3 +84,19 @@ typecheck and Vite build passed, and JavaScript/shell syntax plus diff checks
 passed. `assets:verify` remains fail-closed for the same absent generated
 kernel/initramfs/snapshot artifacts; the i386 Docker build blocker remains
 unchanged.
+
+## Third repair
+
+- Snapshot capture creates separate browser contexts for both fresh VMs, so
+  v86 module state cannot cross the comparison. Each context installs fixed
+  Date constructor/clock, performance clock, Math randomness, and Web Crypto
+  randomness through an init script before importing `libv86`.
+- The gated smoke runs a production-config Vite build as a loaded Chrome
+  extension, obtains the generated worker chunk from that build, and keeps the
+  same worker alive through `VM_INIT`, `VM_READY`, and `VM_EXEC` while checking
+  the serial smoke delta. It no longer imports source `V86Runtime` in the test.
+
+Third-repair verification: full Vitest suite passed (90 passed, 1 gated skip),
+typecheck, production Vite build, JavaScript/shell syntax, and diff checks
+passed. `assets:verify` remains intentionally non-zero only for the missing
+generated kernel/initramfs/snapshot assets and snapshot manifest digest.

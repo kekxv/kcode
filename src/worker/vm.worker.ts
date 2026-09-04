@@ -83,9 +83,16 @@ async function dispatch(value: unknown): Promise<void> {
     self.close();
     return;
   }
+  if (!runtime) {
+    fail(requestId, 'VM_RUNTIME_NOT_READY', 'The Linux runtime is not ready.');
+    return;
+  }
+  // Task 8 adds framed completion/exit status. Until then, serial input remains
+  // available so the verified runtime can be smoke-tested through this Worker.
   serialRequestId = requestId;
-  // Command framing arrives in Task 8. Never retain a live guest between calls.
-  invalidateRuntime();
-  fail(requestId, 'VM_EXEC_UNAVAILABLE', 'Shell execution is not installed yet.');
-  self.close();
+  try {
+    runtime.serialSend(`${value.command}\n`);
+  } catch {
+    fail(requestId, 'VM_SERIAL_SEND_FAILED', 'The Linux runtime rejected serial input.');
+  }
 }
