@@ -14,7 +14,7 @@
 
 ## Commit
 
-- `feat: add reproducible v86 alpine runtime` (created after final checks)
+- `a0cd089 feat: add reproducible v86 alpine runtime`
 
 ## TDD and checks
 
