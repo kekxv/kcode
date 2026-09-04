@@ -77,8 +77,12 @@ export class VMClient {
       try {
         worker.postMessage(message);
       } catch {
-        this.pending.delete(requestId);
-        reject(error('VM_WORKER_UNAVAILABLE'));
+        if (body.kind === 'VM_ATTACH_WORKSPACE') {
+          this.terminate('VM_WORKER_UNAVAILABLE');
+        } else {
+          this.pending.delete(requestId);
+          reject(error('VM_WORKER_UNAVAILABLE'));
+        }
       }
       void expected;
     });

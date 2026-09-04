@@ -23,3 +23,14 @@ The initial required focused command was run before implementation and failed be
 ## Known concern
 
 `npm run build` still stops before Vite at the pre-existing missing `scripts/verify-vm-assets.mjs` task from the VM-assets milestone. The task-local `npx vite build` succeeds after adding the deliberately fail-closed worker entry. Vite also reports its existing future `configLoader: native` JSON-import warning.
+
+## Fix round 1 — P1 regressions
+
+Four new tests were added and run RED against commit `dd6ad8c` before production changes:
+
+- A live WISP relay URL path change left `networkMode` active and did not terminate/revoke.
+- `TerminalPane` did not provide a delta-only delivery path for accumulated terminal chunks.
+- BEL, backspace, tab, IND, and RI survived terminal sanitization.
+- A thrown `VM_ATTACH_WORKSPACE` post rejected only that promise while retaining the worker boundary.
+
+GREEN changes wire the relay input to compare the normalized complete URL during active WISP use and call `stopAndRevoke('RELAY_URL_CHANGED')`; track a terminal delivery cursor so only appended chunks are passed to `TerminalManager`; allow only printable text, CR/LF, and approved SGR through the sanitizer; and terminate/clear every VM pending boundary after an attach post failure. Focused regression tests passed after the changes.

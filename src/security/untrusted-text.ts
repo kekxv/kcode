@@ -32,7 +32,11 @@ export class TerminalChunkSanitizer {
       switch (this.state) {
         case 'text':
           if (character === '\u001b') this.state = 'esc';
-          else if (character !== '\u009b' && character !== '\u0090' && character !== '\u009d' && character !== '\u009f' && character !== '\u009e') safe += character;
+          else {
+            const codePoint = character.codePointAt(0)!;
+            if ((codePoint >= 0x20 && codePoint !== 0x7f && !(codePoint >= 0x80 && codePoint <= 0x9f))
+              || character === '\n' || character === '\r') safe += character;
+          }
           break;
         case 'esc':
           if (character === '[') {

@@ -58,4 +58,22 @@ describe('Side Panel shell', () => {
     expect(services.workspace.requestReadWrite).toHaveBeenCalledTimes(1);
     expect(services.consent.grant).toHaveBeenCalledWith(['auto'], { workspaceId: 'workspace-1', relayUrl: null });
   });
+
+  it('stops and revokes active high-risk mode when the relay URL changes', async () => {
+    // Break caught: a new relay path keeps authority granted for the old normalized full relay URL.
+    const services = fakeServices(true);
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await screen.findByRole('button', { name: '开始任务' });
+    await fireEvent.click(screen.getByRole('checkbox', { name: '连接工作区网络' }));
+    const relay = await screen.findByRole('textbox', { name: 'WISP relay URL' });
+    await fireEvent.update(relay, 'wss://relay.example/first');
+    for (const box of screen.getAllByRole('checkbox', { name: /启用网络后|WISP 中继/ })) await fireEvent.click(box);
+    await fireEvent.click(screen.getByRole('button', { name: '启用 Auto' }));
+    await screen.findByText('网络：wisp');
+    await fireEvent.update(relay, 'wss://relay.example/second');
+
+    await screen.findByText('网络：offline');
+    expect(services.vm.terminate).toHaveBeenCalledWith('RELAY_URL_CHANGED');
+    expect(services.consent.revokeAll).toHaveBeenCalledTimes(2);
+  });
 });

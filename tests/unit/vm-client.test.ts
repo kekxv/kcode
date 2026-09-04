@@ -8,8 +8,9 @@ class FakeWorker {
   onerror: ((event: ErrorEvent) => void) | null = null;
   readonly posted: unknown[] = [];
   terminated = false;
+  throwOnPost = false;
 
-  postMessage(message: unknown): void { this.posted.push(message); }
+  postMessage(message: unknown): void { if (this.throwOnPost) throw new Error('disconnected'); this.posted.push(message); }
   terminate(): void { this.terminated = true; }
   emit(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
 }
@@ -53,5 +54,22 @@ describe('VMClient', () => {
     await expect(pending).rejects.toThrow('USER_STOP');
     client.terminate('SECOND_STOP');
     expect(lifecycle).toHaveBeenCalledTimes(1);
+  });
+
+  it('terminates and recreates the worker when attaching the directory handle cannot post', async () => {
+    // Break caught: a failed structured-clone post leaves a live worker or cloned workspace authority behind.
+    const failedWorker = new FakeWorker();
+    failedWorker.throwOnPost = true;
+    const replacementWorker = new FakeWorker();
+    const workers = [failedWorker, replacementWorker];
+    const lifecycle = vi.fn();
+    const client = new VMClient(() => workers.shift() as unknown as Worker);
+    client.subscribe(lifecycle);
+
+    await expect(client.attachWorkspace({} as FileSystemDirectoryHandle)).rejects.toThrow('VM_WORKER_UNAVAILABLE');
+    expect(failedWorker.terminated).toBe(true);
+    expect(lifecycle).toHaveBeenCalledWith({ kind: 'terminated', reason: 'VM_WORKER_UNAVAILABLE' });
+    client.exec('pwd', { timeoutMs: 120_000 });
+    expect(replacementWorker.posted).toHaveLength(1);
   });
 });

@@ -19,6 +19,11 @@ describe('untrusted text defenses', () => {
     expect(sanitizeTerminalChunk('\u001b[31mred\u001b[0m\u001bPsecret\u001b\\\u001b_payload\u001b\\\u001b^hidden\u001b\\'))
       .toBe('\u001b[31mred\u001b[0m');
   });
+
+  it('keeps only CR/LF among C0 controls and strips every C1 control', () => {
+    // Break caught: BEL, backspace, IND, or RI can still alter the terminal after sanitization.
+    expect(sanitizeTerminalChunk('one\u0007\u0008\u0009\n\rtwo\u0084\u008dthree')).toBe('one\n\rtwothree');
+  });
 });
 
 describe('TerminalManager', () => {

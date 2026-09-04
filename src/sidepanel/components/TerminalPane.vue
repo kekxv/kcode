@@ -5,15 +5,23 @@ import type { TerminalManager } from '../terminal-manager';
 const props = defineProps<{ chunks?: readonly string[] }>();
 const host = ref<HTMLElement>();
 let terminal: TerminalManager | null = null;
+let deliveredChunks = 0;
+const writeNewChunks = (): void => {
+  const chunks = props.chunks ?? [];
+  if (chunks.length < deliveredChunks) deliveredChunks = 0;
+  if (!terminal) return;
+  for (const chunk of chunks.slice(deliveredChunks)) terminal.write(chunk);
+  deliveredChunks = chunks.length;
+};
 onMounted(async () => {
-  // Chrome supports matchMedia; skipping the renderer keeps non-browser test/preview hosts from emulating a terminal unsafely.
-  if (host.value && typeof window.matchMedia === 'function' && !navigator.userAgent.includes('jsdom')) {
+  if (host.value && typeof window.matchMedia === 'function') {
     const { TerminalManager } = await import('../terminal-manager');
     terminal = new TerminalManager();
     terminal.mount(host.value);
+    writeNewChunks();
   }
 });
-watch(() => props.chunks, (chunks) => chunks?.forEach((chunk) => terminal?.write(chunk)), { deep: true });
+watch(() => props.chunks, writeNewChunks, { deep: true });
 onBeforeUnmount(() => terminal?.dispose());
 </script>
 
