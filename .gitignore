@@ -4,3 +4,6 @@ dist/
 node_modules/
 playwright-report/
 test-results/
+public/v86/*
+!public/v86/README.md
+!public/v86/asset-manifest.json
