@@ -17,6 +17,7 @@
 - `a0cd089 feat: add reproducible v86 alpine runtime`
 - `aebb371 fix: harden v86 boot readiness`
 - `a49a298 fix: make v86 lifecycle deterministic`
+- `5f43bcb fix: isolate deterministic v86 snapshots`
 
 ## TDD and checks
 
