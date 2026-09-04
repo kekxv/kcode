@@ -38,3 +38,7 @@ GREEN changes wire the relay input to compare the normalized complete URL during
 ## Fix round 2 — 8-bit terminal string controls
 
 The new sanitizer regression was run RED with 8-bit OSC (`\u009d2;title\u0007`), DCS (`\u0090secret\u001b\\`), APC, and PM. The old parser removed only their C1 introducers and leaked the payload text. GREEN routes C1 OSC/DCS/APC/PM introducers into the existing stateful string-removal state, using BEL or ST termination just like the ESC-prefixed forms. Approved SGR and printable/CR/LF behavior remain covered by the existing tests.
+
+## Fix round 3 — C1 string terminator
+
+New RED tests showed that `\u0090secret\u009cafter` swallowed `after`: C1 ST (`U+009C`) was consumed as payload rather than ending the 8-bit DCS state. The same test exercises a C1 OSC split at the end of one chunk followed by printable output in the next. GREEN treats C1 ST as a string-state terminator alongside BEL and `ESC \\`, restoring the parser to text state for the next chunk.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { vi } from 'vitest';
-import { sanitizeTerminalChunk, visualizeControls } from '../../src/security/untrusted-text';
+import { sanitizeTerminalChunk, TerminalChunkSanitizer, visualizeControls } from '../../src/security/untrusted-text';
 import { TerminalManager } from '../../src/sidepanel/terminal-manager';
 
 describe('untrusted text defenses', () => {
@@ -29,6 +29,14 @@ describe('untrusted text defenses', () => {
     // Break caught: stripping only a C1 introducer leaves title or string-control payload text in terminal output.
     const hostile = 'safe\u009d2;title\u0007osc\u0090secret\u001b\\dcs\u009fapc\u001b\\apc\u009epm\u001b\\done';
     expect(sanitizeTerminalChunk(hostile)).toBe('safeoscdcsapcdone');
+  });
+
+  it('ends 8-bit control strings at C1 ST, including when split across chunks', () => {
+    // Break caught: C1 ST is consumed as payload, so later printable output disappears from the terminal.
+    expect(sanitizeTerminalChunk('\u0090secret\u009cafter')).toBe('after');
+    const sanitizer = new TerminalChunkSanitizer();
+    expect(sanitizer.write('\u009dtitle\u009c')).toBe('');
+    expect(sanitizer.write('after')).toBe('after');
   });
 });
 
