@@ -91,7 +91,8 @@ async function dispatch(value: unknown): Promise<void> {
   // available so the verified runtime can be smoke-tested through this Worker.
   serialRequestId = requestId;
   try {
-    runtime.serialSend(`${value.command}\n`);
+    // The selected FSA directory is intentionally the only guest work area.
+    runtime.serialSend(`cd /work && ${value.command}\n`);
   } catch {
     fail(requestId, 'VM_SERIAL_SEND_FAILED', 'The Linux runtime rejected serial input.');
   }

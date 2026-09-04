@@ -8,6 +8,7 @@ class FakeRuntime {
   private resolveBoot!: () => void;
   private rejectBoot!: (error: Error) => void;
   destroyed = false;
+  readonly sent: string[] = [];
 
   constructor(_options: unknown) {
     FakeRuntime.instances.push(this);
@@ -26,6 +27,7 @@ class FakeRuntime {
   }
 
   async attachWorkspace(): Promise<void> {}
+  serialSend(command: string): void { this.sent.push(command); }
 
   destroy(): void {
     this.destroyed = true;
@@ -46,6 +48,18 @@ afterEach(() => {
 });
 
 describe('vm.worker lifecycle correlation', () => {
+  it('dispatches every guest command from the exclusive /work mount point', async () => {
+    // Break caught: shell commands run from guest root/home can access a different filesystem even while /work is correctly mounted.
+    vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
+    expect(FakeRuntime.instances[0].sent).toEqual(['cd /work && pwd\n']);
+  });
+
   it('keeps the newest VM session correlated after readiness and ignores a superseded boot', async () => {
     // Break caught: a late failure from an older boot destroys the newer VM or sends serial to the wrong request.
     const postMessage = vi.fn();

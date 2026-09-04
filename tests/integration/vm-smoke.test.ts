@@ -54,6 +54,18 @@ class FakeV86 {
 }
 
 describe('V86Runtime', () => {
+  it('installs a 9P handler and mounts the selected directory exclusively at /work', async () => {
+    // Break caught: mounting at guest root, home, or /workspace lets shell dispatch escape the selected workspace contract.
+    const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
+    const boot = runtime.boot({ useSnapshot: false });
+    FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n'); await boot;
+    const root = { kind: 'directory', resolve: async (handle: unknown) => handle === root ? [] : null } as unknown as FileSystemDirectoryHandle;
+    await runtime.attachWorkspace(root);
+    expect(FakeV86.latest?.config.filesystem).toMatchObject({ handle9p: expect.any(Function) });
+    expect(FakeV86.latest?.sent).toContain('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work\n');
+    expect(FakeV86.latest?.sent.join('')).not.toContain('/workspace');
+  });
+
   it('boots an offline guest with exactly 256 MiB, empty 9P, and no network device', async () => {
     // Break caught: adding a NIC, changing RAM, or omitting the reserved empty 9P device changes the offline VM boundary.
     const runtime = new V86Runtime({

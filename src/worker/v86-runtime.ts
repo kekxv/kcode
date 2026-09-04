@@ -1,4 +1,5 @@
 import { V86, type V86Options } from 'v86';
+import { P9Server } from './p9/server';
 
 export const VM_MEMORY_BYTES = 256 * 1024 * 1024;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
@@ -33,6 +34,7 @@ export class V86Runtime {
   private readonly onOutputLimit?: () => void;
   private readonly readyTimeoutMs: number;
   private emulator: V86Emulator | null = null;
+  private readonly p9Server = new P9Server();
   private readonly serialListeners = new Set<(delta: string) => void>();
   private readonly decoder = new TextDecoder();
   private serialBytes: number[] = [];
@@ -64,7 +66,7 @@ export class V86Runtime {
       disable_jit: true,
       cmdline: 'console=ttyS0',
       // Preserve the single virtio-9P device for the authorized Task 7 backend.
-      filesystem: {},
+      filesystem: { handle9p: (request, reply) => { void this.p9Server.handle(request, reply); } },
     };
     if (config.useSnapshot !== false) options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
     try {
@@ -87,9 +89,11 @@ export class V86Runtime {
     await ready;
   }
 
-  /** Task 7 replaces the empty built-in 9P backend before issuing a mount. */
-  async attachWorkspace(_handle: FileSystemDirectoryHandle): Promise<void> {
+  /** Binds only the authorized directory, then mounts it only at the guest /work boundary. */
+  async attachWorkspace(handle: FileSystemDirectoryHandle): Promise<void> {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
+    await this.p9Server.setRoot(handle, ['read']);
+    this.serialSend('mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work\n');
   }
 
   serialSend(data: string): void {
