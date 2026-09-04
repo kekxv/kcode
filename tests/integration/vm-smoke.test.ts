@@ -52,13 +52,18 @@ class FakeV86 {
     for (const byte of bytes) this.listeners.get('serial0-output-byte')?.(byte);
   }
 }
+const guestReadyMarker = (): string => {
+  const marker = FakeV86.latest?.sent.join('').match(/KCODE_READY_[A-Za-z0-9-]+/)?.[0];
+  if (!marker) throw new Error('guest readiness marker missing');
+  return marker;
+};
 
 describe('V86Runtime', () => {
   it('installs a 9P handler and mounts the selected directory exclusively at /work', async () => {
     // Break caught: mounting at guest root, home, or /workspace lets shell dispatch escape the selected workspace contract.
     const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
     const boot = runtime.boot({ useSnapshot: false });
-    FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n'); await boot;
+    FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`); await boot;
     const root = { kind: 'directory', resolve: async (handle: unknown) => handle === root ? [] : null } as unknown as FileSystemDirectoryHandle;
     let attached = false;
     const attach = runtime.attachWorkspace(root).then(() => { attached = true; });
@@ -84,10 +89,10 @@ describe('V86Runtime', () => {
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
     expect(settled).toBe(false);
     FakeV86.latest?.emit('emulator-loaded');
-    expect(FakeV86.latest?.sent).toContain("printf 'KCODE_GUEST_READY\\n' >/dev/ttyS0\n");
+    expect(FakeV86.latest?.sent.join('')).toContain(`printf '${guestReadyMarker()}\\n' >/dev/ttyS0`);
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
     expect(settled).toBe(false);
-    FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
     await boot;
 
     expect(FakeV86.latest?.config).toMatchObject({
@@ -98,9 +103,9 @@ describe('V86Runtime', () => {
       initrd: { url: 'chrome-extension://test/v86/kcode-initramfs' },
       memory_size: 256 * 1024 * 1024,
       autostart: true,
-      disable_jit: true,
       filesystem: {},
     });
+    expect(FakeV86.latest?.config).not.toHaveProperty('disable_jit');
     expect(FakeV86.latest?.config).not.toHaveProperty('net_device');
     expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
 
@@ -121,12 +126,12 @@ describe('V86Runtime', () => {
 
     const boot = runtime.boot();
     FakeV86.latest?.emit('emulator-loaded');
-    FakeV86.latest?.emitSerial('KCODE_GUEST_READY\nKCODE_SMOKE\n');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\nKCODE_SMOKE\n`);
     await boot;
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
 
     expect(FakeV86.latest?.config.initial_state).toEqual({ url: 'chrome-extension://test/v86/alpine-state.bin.zst' });
-    expect(output.join('')).toBe('KCODE_GUEST_READY\nKCODE_SMOKE\n');
+    expect(output.join('')).toBe(`${guestReadyMarker()}\nKCODE_SMOKE\n`);
   });
 
   it('splits invalid serial bytes by encoded UTF-8 payload size', async () => {
@@ -139,7 +144,7 @@ describe('V86Runtime', () => {
     runtime.onSerial((delta) => deltas.push(delta));
     const boot = runtime.boot({ useSnapshot: false });
     FakeV86.latest?.emit('emulator-loaded');
-    FakeV86.latest?.emitSerial('KCODE_GUEST_READY\n');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
     await boot;
     deltas.length = 0;
 
@@ -153,6 +158,11 @@ describe('V86Runtime', () => {
 });
 
 describe('two-stage Alpine boot assets', () => {
+  it('creates the immutable /work mount point before packaging the read-only root image', async () => {
+    // Break caught: a read-only SquashFS without /work makes the authorized 9P mount fail before the backend is contacted.
+    expect(await fs.readFile(join(root, 'scripts/build-alpine-guest.sh'), 'utf8')).toContain('mkdir -p "$staging/rootfs/work"');
+  });
+
   it('lists the embedded SquashFS root image in the manifest', async () => {
     // Break caught: omitting the separately verified root image makes the loader's embedded payload unverifiable.
     const manifest = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
@@ -318,12 +328,15 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
       const extensionOrigin = serviceWorker.url().match(/^(chrome-extension:\/\/[^/]+)/)?.[1];
       if (!extensionOrigin) throw new Error('PACKAGED_VM_EXTENSION_ORIGIN_MISSING');
       const page = await browser.newPage();
+      const runtimeLogs: string[] = [];
+      page.on('console', (message) => runtimeLogs.push(message.text()));
       await page.goto(`${extensionOrigin}/src/sidepanel/index.html`);
-      await expect(page.evaluate(async ({ workerFile }) => {
+      const workspaceOutput = await page.evaluate(async ({ workerFile }) => {
         return new Promise<string>((resolve, reject) => {
           const worker = new Worker(chrome.runtime.getURL(`assets/${workerFile}`), { type: 'module' });
-          let phase: 'boot' | 'attach' | 'exec' = 'boot';
+          let phase: 'boot' | 'attach' | 'begin' | 'quiet' | 'read' | 'readonly' | 'protected' | 'write' | 'rollback' = 'boot';
           let output = '';
+          let directory: FileSystemDirectoryHandle | null = null;
           const events: unknown[] = [];
           const timer = setTimeout(() => reject(new Error(`worker workspace timeout:${JSON.stringify(events)}`)), 20_000);
           worker.onmessage = ({ data }) => {
@@ -331,7 +344,7 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
             if (data?.kind === 'VM_READY' && phase === 'boot') {
               phase = 'attach';
               void (async () => {
-                const directory = await navigator.storage.getDirectory();
+                directory = await navigator.storage.getDirectory();
                 for (const [name, contents] of [['visible.txt', 'host-visible'], ['.env', 'host-secret']] as const) {
                   const file = await directory.getFileHandle(name, { create: true });
                   const writable = await file.createWritable(); await writable.write(contents); await writable.close();
@@ -341,22 +354,70 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
               return;
             }
             if (data?.kind === 'VM_READY' && phase === 'attach') {
-              phase = 'exec';
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-smoke', command: "pwd; cat visible.txt; find . -maxdepth 1 -type f -print; : > denied.txt; printf 'KCODE_RESULT:write=%s\\n' \"$?\"", timeoutMs: 30_000 });
+              phase = 'quiet';
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-quiet', command: 'stty -echo', timeoutMs: 30_000 });
+              setTimeout(() => {
+                if (phase !== 'quiet') return;
+                phase = 'read';
+                worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-read', command: "pwd; cat visible.txt; find . -maxdepth 1 -type f -print; printf 'KCODE_READ_DONE\\n'", timeoutMs: 30_000 });
+              }, 100);
               return;
             }
-            if (phase === 'exec' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-smoke') {
+            if (phase === 'read' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-read') {
               output += data.delta;
-              if (!output.includes('KCODE_RESULT:')) return;
-              clearTimeout(timer);
-              worker.terminate();
-              resolve(output);
+              if (!output.includes('KCODE_READ_DONE')) return;
+              phase = 'readonly';
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-readonly', command: "if sh -c ': > denied.txt'; then rc=0; else rc=$?; fi; printf 'KCODE_READONLY_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
+              return;
+            }
+            if (phase === 'readonly' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-readonly') {
+              output += data.delta;
+              if (!/KCODE_READONLY_DONE:[1-9]/.test(output)) return;
+              phase = 'protected';
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-protected', command: "if sh -c 'cat .env >/dev/null'; then rc=0; else rc=$?; fi; printf 'KCODE_PROTECTED_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
+              return;
+            }
+            if (phase === 'protected' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-protected') {
+              output += data.delta;
+              if (!/KCODE_PROTECTED_DONE:[1-9]/.test(output)) return;
+              phase = 'begin';
+              worker.postMessage({ kind: 'VM_BEGIN_TRANSACTION', requestId: 'worker-begin', transactionId: 'smoke_tx' });
+              return;
+            }
+            if (data?.kind === 'VM_READY' && phase === 'begin') {
+              phase = 'write';
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-write', command: "printf approved > approved.txt; rc=$?; printf 'KCODE_WRITE_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
+              return;
+            }
+            if (phase === 'write' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-write') {
+              output += data.delta;
+              if (!output.includes('KCODE_WRITE_DONE:0')) return;
+              void (async () => {
+                phase = 'rollback';
+                worker.postMessage({ kind: 'VM_ROLLBACK_TRANSACTION', requestId: 'worker-rollback' });
+              })().catch(reject);
+              return;
+            }
+            if (phase === 'rollback' && data?.kind === 'VM_READY') {
+              void (async () => {
+                if (!directory) throw new Error('workspace missing after rollback');
+                await directory.getFileHandle('approved.txt').then(
+                  () => { throw new Error('rollback left approved guest write in FSA'); },
+                  (error: unknown) => { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') throw error; },
+                );
+                clearTimeout(timer);
+                worker.terminate();
+                resolve(output);
+              })().catch(reject);
             }
             if (data?.kind === 'VM_ERROR') { clearTimeout(timer); reject(new Error(`${data.code}:${JSON.stringify(events)}`)); }
           };
-          worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } } });
+          worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } });
         });
-      }, { workerFile })).resolves.toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_RESULT:write=[1-9]/));
+      }, { workerFile }).catch((error) => { throw new Error(`${String(error)}; runtime logs: ${runtimeLogs.join(' | ')}`); });
+      expect(workspaceOutput).toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_READONLY_DONE:[1-9][\s\S]*KCODE_PROTECTED_DONE:[1-9][\s\S]*KCODE_WRITE_DONE:0/));
+      expect(workspaceOutput).not.toMatch(/(?:^|\r?\n)\.\/\.env(?:\r?\n|$)/);
+      expect(runtimeLogs.join('\n')).not.toContain('KCODE_9P_');
     } finally {
       await browser.close();
       await fs.rm(userDataDirectory, { recursive: true, force: true });

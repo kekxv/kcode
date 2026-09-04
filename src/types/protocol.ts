@@ -68,6 +68,9 @@ export type VMRequest =
   | { kind: 'VM_INIT'; requestId: string; session: WorkspaceSession }
   | { kind: 'VM_ATTACH_WORKSPACE'; requestId: string; handle: FileSystemDirectoryHandle }
   | { kind: 'VM_EXEC'; requestId: string; command: string; timeoutMs: number }
+  | { kind: 'VM_BEGIN_TRANSACTION'; requestId: string; transactionId: string }
+  | { kind: 'VM_COMMIT_TRANSACTION'; requestId: string }
+  | { kind: 'VM_ROLLBACK_TRANSACTION'; requestId: string }
   | { kind: 'VM_CANCEL'; requestId: string; targetRequestId: string };
 
 export type VMEvent =
@@ -204,6 +207,11 @@ export const isVMRequest = (value: unknown): value is VMRequest => {
         && bytesAtMost(value.command, MAX_PORT_BYTES)
         && isFiniteInteger(value.timeoutMs)
         && value.timeoutMs > 0;
+    case 'VM_BEGIN_TRANSACTION':
+      return hasExactKeys(value, ['kind', 'requestId', 'transactionId']) && isId(value.transactionId);
+    case 'VM_COMMIT_TRANSACTION':
+    case 'VM_ROLLBACK_TRANSACTION':
+      return hasExactKeys(value, ['kind', 'requestId']);
     case 'VM_CANCEL':
       return hasExactKeys(value, ['kind', 'requestId', 'targetRequestId']) && isId(value.targetRequestId);
     default:
@@ -217,7 +225,9 @@ export const isAuthorizedVMRequest = (
   authorizer: WorkspaceSessionAuthorizer,
 ): value is VMRequest =>
   isVMRequest(value)
-  && (value.kind !== 'VM_ATTACH_WORKSPACE' || authorizer.canAttachWorkspace());
+  && (value.kind !== 'VM_ATTACH_WORKSPACE' || authorizer.canAttachWorkspace())
+  && (!['VM_BEGIN_TRANSACTION', 'VM_COMMIT_TRANSACTION', 'VM_ROLLBACK_TRANSACTION'].includes(value.kind)
+    || authorizer.transactionCapabilities() !== null);
 
 export const isVMEvent = (value: unknown): value is VMEvent => {
   if (!isRecord(value) || !isId(value.requestId)) return false;

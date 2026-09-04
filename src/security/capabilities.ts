@@ -100,6 +100,13 @@ export class WorkspaceSessionAuthorizer {
   canAttachWorkspace(): boolean {
     return this.activeSession?.mode === 'workspace';
   }
+
+  /** Mutation authority is fixed at VM_INIT and cannot be supplied by a later guest-facing request. */
+  transactionCapabilities(): readonly WorkspaceCapability[] | null {
+    const session = this.activeSession;
+    if (!session || (!session.capabilities.includes('write') && !session.capabilities.includes('delete'))) return null;
+    return Object.freeze([...session.capabilities]);
+  }
 }
 
 export const hasWorkspaceCapability = (

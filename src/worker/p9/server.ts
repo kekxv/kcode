@@ -64,7 +64,7 @@ export class P9Server {
       case 'Tread': { const fid = this.fid(request.fid); const stat = await backend.stat(fid.pathSegments); if (stat.kind === 'directory') throw new P9Error(ERRNO.EISDIR, 'Directories are read with readdir.'); return { type: 'Rread', tag: request.tag, data: await backend.read(fid.pathSegments, toSafeBrowserNumber(request.offset), request.count) }; }
       case 'Twrite': { const fid = this.fid(request.fid); const before = await backend.snapshot(fid.pathSegments); const resultingBytes = Math.max(before.size ?? 0, toSafeBrowserNumber(request.offset) + request.data.byteLength); const count = await this.mutate(request.tag, 'write', [{ path: fid.pathSegments, resultingBytes, original: before }], () => backend.write(fid.pathSegments, toSafeBrowserNumber(request.offset), request.data), request.data.byteLength); return { type: 'Rwrite', tag: request.tag, count }; }
       case 'Tclunk': this.needFid(request.fid); this.fids.delete(request.fid); return { type: 'Rclunk', tag: request.tag };
-      case 'Tgetattr': { const fid = this.fid(request.fid); const stat = await backend.stat(fid.pathSegments); const isDirectory = stat.kind === 'directory'; return { type: 'Rgetattr', tag: request.tag, valid: 0xffffn, qid: await this.qid(fid.pathSegments, stat.kind), mode: isDirectory ? 0o40555 : 0o100444, uid: 0, gid: 0, nlink: 1n, rdev: 0n, size: BigInt(stat.size), blksize: 4096n, blocks: BigInt(Math.ceil(stat.size / 512)), atimeSec: 0n, atimeNsec: 0n, mtimeSec: BigInt(Math.floor(stat.lastModified / 1000)), mtimeNsec: 0n, ctimeSec: BigInt(Math.floor(stat.lastModified / 1000)), ctimeNsec: 0n }; }
+      case 'Tgetattr': { const fid = this.fid(request.fid); const stat = await backend.stat(fid.pathSegments); const isDirectory = stat.kind === 'directory'; return { type: 'Rgetattr', tag: request.tag, valid: 0xffffn, qid: await this.qid(fid.pathSegments, stat.kind), mode: isDirectory ? 0o40555 : 0o100444, uid: 0, gid: 0, nlink: 1n, rdev: 0n, size: BigInt(stat.size), blksize: 4096n, blocks: BigInt(Math.ceil(stat.size / 512)), atimeSec: 0n, atimeNsec: 0n, mtimeSec: BigInt(Math.floor(stat.lastModified / 1000)), mtimeNsec: 0n, ctimeSec: BigInt(Math.floor(stat.lastModified / 1000)), ctimeNsec: 0n, btimeSec: 0n, btimeNsec: 0n, gen: 0n, dataVersion: 0n }; }
       case 'Tsetattr': { const fid = this.fid(request.fid); if (request.valid & 0x8) { const size = toSafeBrowserNumber(request.size); await this.mutate(request.tag, 'write', [{ path: fid.pathSegments, resultingBytes: size }], () => backend.truncate(fid.pathSegments, size)); } return { type: 'Rsetattr', tag: request.tag }; }
       case 'Treaddir': return { type: 'Rreaddir', tag: request.tag, data: await this.readdir(this.fid(request.fid).pathSegments, toSafeBrowserNumber(request.offset), request.count) };
       case 'Tfsync': this.needFid(request.fid); return { type: 'Rfsync', tag: request.tag };
@@ -89,7 +89,10 @@ export class P9Server {
       }
       return await apply();
     } catch (error) {
-      if (this.mutationPoisoned) this.journal?.markNeedsRollback();
+      if (this.mutationPoisoned || (error instanceof P9Error && error.errno === ERRNO.ETIMEDOUT)) {
+        this.mutationPoisoned = true;
+        this.journal?.markNeedsRollback();
+      }
       throw error;
     } finally { this.activeMutations.delete(tag); this.queuedMutationBytes -= queuedBytes; }
   }

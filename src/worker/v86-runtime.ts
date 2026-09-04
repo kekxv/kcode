@@ -1,5 +1,5 @@
 import { V86, type V86Options } from 'v86';
-import { P9Server } from './p9/server';
+import { P9Server, type TransactionPolicy } from './p9/server';
 
 export const VM_MEMORY_BYTES = 256 * 1024 * 1024;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
@@ -43,7 +43,7 @@ export class V86Runtime {
   private destroyed = false;
   private bootSerialTail = '';
   private bootProbeTimer: ReturnType<typeof setInterval> | null = null;
-  private bootReady: { loaded: boolean; guestReady: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private bootReady: { loaded: boolean; guestReady: boolean; marker: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(dependencies: V86RuntimeDependencies = {}) {
     this.V86 = dependencies.V86 ?? V86;
@@ -63,11 +63,11 @@ export class V86Runtime {
       initrd: { url: this.assetUrl('kcode-initramfs') },
       memory_size: VM_MEMORY_BYTES,
       autostart: true,
-      // Snapshot capture uses the interpreter so two fresh states are byte-identical.
-      disable_jit: true,
       cmdline: 'console=ttyS0',
       // Preserve the single virtio-9P device for the authorized Task 7 backend.
-      filesystem: { handle9p: (request, reply) => { void this.p9Server.handle(request, reply); } },
+      filesystem: { handle9p: (request, reply) => {
+        void this.p9Server.handle(request, reply);
+      } },
     };
     if (config.useSnapshot !== false) options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
     try {
@@ -103,6 +103,22 @@ export class V86Runtime {
     const mounted = this.waitForSerialMarker(marker);
     this.serialSend(`mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work; rc=$?; printf '${marker}:%s\\n' "$rc" >/dev/ttyS0\n`);
     await mounted;
+  }
+
+  /** The caller supplies only a transaction ID; its immutable session determines capabilities. */
+  beginTransaction(transactionId: string, capabilities: TransactionPolicy['capabilities']): void {
+    if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
+    this.p9Server.setTransactionPolicy({ transactionId, capabilities });
+  }
+
+  async commitTransaction(): Promise<void> {
+    await this.p9Server.commitTransaction();
+    this.p9Server.setTransactionPolicy(null);
+  }
+
+  async rollbackTransaction(): Promise<void> {
+    await this.p9Server.rollbackTransaction();
+    this.p9Server.setTransactionPolicy(null);
   }
 
   serialSend(data: string): void {
@@ -179,7 +195,8 @@ export class V86Runtime {
       this.bootSerialTail = `${this.bootSerialTail}${delta}`.slice(-64);
       // The serial terminal echoes our `printf` command; accept only a real
       // marker line, never the marker text inside that echoed command.
-      this.bootReady.guestReady ||= /(?:^|\r?\n)KCODE_GUEST_READY\r?\n/.test(this.bootSerialTail);
+      const marker = this.bootReady.marker;
+      this.bootReady.guestReady ||= new RegExp(`(?:^|\\r?\\n)${marker}\\r?\\n`).test(this.bootSerialTail);
       this.finishBootIfReady();
     }
     for (const listener of this.serialListeners) listener(delta);
@@ -189,7 +206,7 @@ export class V86Runtime {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.failBoot(new Error('VM_BOOT_TIMEOUT')), this.readyTimeoutMs);
       this.bootSerialTail = '';
-      this.bootReady = { loaded: false, guestReady: false, resolve, reject, timer };
+      this.bootReady = { loaded: false, guestReady: false, marker: `KCODE_READY_${crypto.randomUUID()}`, resolve, reject, timer };
     });
   }
 
@@ -229,6 +246,7 @@ export class V86Runtime {
   }
 
   private sendBootProbe(): void {
-    this.serialSend("printf 'KCODE_GUEST_READY\\n' >/dev/ttyS0\n");
+    const marker = this.bootReady?.marker;
+    if (marker) this.serialSend(`printf '${marker}\\n' >/dev/ttyS0\n`);
   }
 }

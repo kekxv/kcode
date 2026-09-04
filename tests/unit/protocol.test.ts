@@ -101,6 +101,17 @@ describe('Chrome Port protocol guards', () => {
     expect(isAuthorizedVMRequest(attach, authorizer)).toBe(false);
   });
 
+  it('admits transaction control only from a session that was approved for mutation', () => {
+    // Break caught: accepting caller-provided write capabilities lets arbitrary guest-facing code escalate a read-only mount.
+    const authorizer = new WorkspaceSessionAuthorizer();
+    const begin = { kind: 'VM_BEGIN_TRANSACTION', requestId: 'req-1', transactionId: 'tx_1' };
+    expect(isVMRequest(begin)).toBe(true);
+    authorizer.activate({ mode: 'workspace', capabilities: ['read'], network: { mode: 'offline' } });
+    expect(isAuthorizedVMRequest(begin, authorizer)).toBe(false);
+    authorizer.activate({ mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } });
+    expect(isAuthorizedVMRequest(begin, authorizer)).toBe(true);
+  });
+
   it.each([
     'ws://relay.test.invalid/wisp',
     'wss://user:pass@relay.test.invalid/wisp',

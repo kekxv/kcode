@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { P9CodecSession, Reader, Writer } from '../../../src/worker/p9/codec';
-import { MESSAGE } from '../../../src/worker/p9/constants';
-import { FsaBackend } from '../../../src/worker/p9/fsa-backend';
+import { ERRNO, MESSAGE } from '../../../src/worker/p9/constants';
+import { FsaBackend, P9Error } from '../../../src/worker/p9/fsa-backend';
 import { P9Server } from '../../../src/worker/p9/server';
 import { MemoryFsaRoot } from '../../helpers/memory-fsa';
 
@@ -34,5 +34,27 @@ describe('P9Server lifecycle', () => {
     expect(replies).toHaveLength(2);
     expect(new DataView(replies[0].buffer, replies[0].byteOffset).getUint8(4)).toBe(MESSAGE.Rversion);
     expect(new DataView(replies[1].buffer, replies[1].byteOffset).getUint8(4)).toBe(MESSAGE.Rattach);
+  });
+
+  it('poisons an approved transaction after an FSA mutation timeout', async () => {
+    // Break caught: allowing another mutation after an unabortable timed-out write can commit host bytes whose outcome is unknown.
+    const backend = {
+      setPolicy: () => {},
+      stat: async () => ({ kind: 'file', size: 0, lastModified: 0 }),
+      snapshot: async () => ({ exists: true, kind: 'file', bytes: new Uint8Array(), size: 0, lastModified: 0 }),
+      write: async () => { throw new P9Error(ERRNO.ETIMEDOUT, 'timed out'); },
+      truncate: async () => {},
+    } as unknown as FsaBackend;
+    const server = new P9Server(backend);
+    server.setTransactionPolicy({ transactionId: 'timeout-1', capabilities: ['read', 'write', 'delete'] });
+    const replies: Uint8Array[] = [];
+    await server.handle(version(), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Tattach, 2, new Writer().u32(0).u32(0xffff_ffff).string('').string('').u32(0).finish()), (reply) => replies.push(reply));
+    await server.handle(frame(MESSAGE.Twrite, 4, new Writer().u32(0).u64(0n).u32(1).bytes(new Uint8Array([1])).finish()), (reply) => replies.push(reply));
+    expect(new DataView(replies.at(-1)!.buffer, replies.at(-1)!.byteOffset).getUint32(7, true)).toBe(110);
+
+    await server.handle(frame(MESSAGE.Tsetattr, 5, new Writer().u32(0).u32(8).u32(0).u32(0).u32(0).u64(0n).u64(0n).u64(0n).u64(0n).u64(0n).finish()), (reply) => replies.push(reply));
+    expect(replies.at(-1)![4]).toBe(MESSAGE.Rlerror);
+    expect(new DataView(replies.at(-1)!.buffer, replies.at(-1)!.byteOffset).getUint32(7, true)).toBe(16);
   });
 });

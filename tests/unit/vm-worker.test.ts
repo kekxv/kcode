@@ -9,12 +9,15 @@ class FakeRuntime {
   private rejectBoot!: (error: Error) => void;
   destroyed = false;
   readonly sent: string[] = [];
+  bootConfig: unknown;
+  transaction: { transactionId: string; capabilities: readonly string[] } | null = null;
 
   constructor(_options: unknown) {
     FakeRuntime.instances.push(this);
   }
 
-  boot(): Promise<void> {
+  boot(config: unknown): Promise<void> {
+    this.bootConfig = config;
     return new Promise<void>((resolve, reject) => {
       this.resolveBoot = resolve;
       this.rejectBoot = reject;
@@ -27,6 +30,9 @@ class FakeRuntime {
   }
 
   async attachWorkspace(): Promise<void> {}
+  beginTransaction(transactionId: string, capabilities: readonly string[]): void { this.transaction = { transactionId, capabilities }; }
+  async commitTransaction(): Promise<void> { this.transaction = null; }
+  async rollbackTransaction(): Promise<void> { this.transaction = null; }
   serialSend(command: string): void { this.sent.push(command); }
 
   destroy(): void {
@@ -48,6 +54,16 @@ afterEach(() => {
 });
 
 describe('vm.worker lifecycle correlation', () => {
+  it('cold-boots workspace sessions so a pre-workspace snapshot cannot retain device state', async () => {
+    // Break caught: restoring the no-workspace snapshot before an attach can preserve stale 9P topology and run the mount before a live shell.
+    vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false });
+  });
+
   it('dispatches every guest command from the exclusive /work mount point', async () => {
     // Break caught: shell commands run from guest root/home can access a different filesystem even while /work is correctly mounted.
     vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
@@ -84,5 +100,26 @@ describe('vm.worker lifecycle correlation', () => {
     newRuntime.emit('KCODE_AFTER_READY');
     expect(postMessage).toHaveBeenLastCalledWith({ kind: 'VM_OUTPUT_DELTA', requestId: 'new', delta: 'KCODE_AFTER_READY' });
     expect(close).not.toHaveBeenCalled();
+  });
+
+  it('derives a transaction policy from the immutable approved session, never the request', async () => {
+    // Break caught: a VM message that carries write capabilities can turn a read-only workspace into a guest-writeable one.
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    const writeSession = { mode: 'workspace', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } as const;
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session: writeSession } } as MessageEvent);
+    FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_1' } } as MessageEvent);
+
+    expect(FakeRuntime.instances[0].transaction).toEqual({ transactionId: 'tx_1', capabilities: ['read', 'write', 'delete'] });
+    expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'begin' });
   });
 });

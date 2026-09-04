@@ -2,18 +2,28 @@ const DATABASE = 'kcode';
 const STORE = 'security-keys';
 const KEY = 'mutation-journal-aes-gcm-256';
 
-const openDatabase = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
-  const request = indexedDB.open(DATABASE, 1);
+const openDatabase = (version?: number): Promise<IDBDatabase> => new Promise((resolve, reject) => {
+  const request = version === undefined ? indexedDB.open(DATABASE) : indexedDB.open(DATABASE, version);
   request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE); };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error ?? new Error('JOURNAL_KEY_STORE_FAILED'));
 });
+const openKeyDatabase = async (): Promise<IDBDatabase> => {
+  let database = await openDatabase();
+  if (database.objectStoreNames.contains(STORE)) return database;
+  const nextVersion = database.version + 1;
+  database.close();
+  database = await openDatabase(nextVersion);
+  if (database.objectStoreNames.contains(STORE)) return database;
+  database.close();
+  throw new Error('JOURNAL_KEY_STORE_FAILED');
+};
 const requestResult = <T>(request: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error ?? new Error('JOURNAL_KEY_STORE_FAILED')); });
 
 /** Returns the origin-local structured-cloneable journal key; it is deliberately non-extractable. */
 export const getJournalKey = async (): Promise<CryptoKey> => {
   if (typeof indexedDB === 'undefined') throw new Error('JOURNAL_KEY_STORE_UNAVAILABLE');
-  const database = await openDatabase();
+  const database = await openKeyDatabase();
   try {
     const readTransaction = database.transaction(STORE, 'readonly');
     const saved = await requestResult(readTransaction.objectStore(STORE).get(KEY));

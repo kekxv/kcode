@@ -153,6 +153,17 @@ describe('9P2000.L codec', () => {
     );
   });
 
+  it('encodes every 9P2000.L getattr field through data_version', () => {
+    // Break caught: omitting btime/generation/data_version makes Linux reject Rgetattr with EFAULT during a real 9P mount.
+    const response = encodeResponse({
+      type: 'Rgetattr', tag: 9, valid: 0xffffn, qid: { type: 0x80, version: 0, path: 1n }, mode: 0o40555,
+      uid: 0, gid: 0, nlink: 1n, rdev: 0n, size: 0n, blksize: 4096n, blocks: 0n,
+      atimeSec: 0n, atimeNsec: 0n, mtimeSec: 0n, mtimeNsec: 0n, ctimeSec: 0n, ctimeNsec: 0n,
+      btimeSec: 0n, btimeNsec: 0n, gen: 0n, dataVersion: 0n,
+    });
+    expect(new DataView(response.buffer, response.byteOffset).getUint32(0, true)).toBe(160);
+  });
+
   it('maps unknown message IDs to Rlerror ENOSYS with the original tag', () => {
     const request = decodeRequest(Uint8Array.from([7, 0, 0, 0, 0xfe, 0x34, 0x12]));
     expect(request).toEqual({ type: 'Tunknown', tag: 0x1234, messageType: 0xfe });

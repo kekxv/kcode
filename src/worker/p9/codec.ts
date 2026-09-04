@@ -230,7 +230,7 @@ const encodeResponseWithin = (response: P9Response, maximum: number): Uint8Array
     case 'Rread': { const data = responseBytes(response.data); type = MESSAGE.Rread; body.u32(data.byteLength).bytes(data); break; }
     case 'Rwrite': type = MESSAGE.Rwrite; body.u32(response.count); break;
     case 'Rclunk': type = MESSAGE.Rclunk; break;
-    case 'Rgetattr': type = MESSAGE.Rgetattr; body.u64(response.valid).qid(response.qid).u32(response.mode).u32(response.uid).u32(response.gid).u64(response.nlink).u64(response.rdev).u64(response.size).u64(response.blksize).u64(response.blocks).u64(response.atimeSec).u64(response.atimeNsec).u64(response.mtimeSec).u64(response.mtimeNsec).u64(response.ctimeSec).u64(response.ctimeNsec); break;
+    case 'Rgetattr': type = MESSAGE.Rgetattr; body.u64(response.valid).qid(response.qid).u32(response.mode).u32(response.uid).u32(response.gid).u64(response.nlink).u64(response.rdev).u64(response.size).u64(response.blksize).u64(response.blocks).u64(response.atimeSec).u64(response.atimeNsec).u64(response.mtimeSec).u64(response.mtimeNsec).u64(response.ctimeSec).u64(response.ctimeNsec).u64(response.btimeSec).u64(response.btimeNsec).u64(response.gen).u64(response.dataVersion); break;
     case 'Rsetattr': type = MESSAGE.Rsetattr; break;
     case 'Rreaddir': { const data = responseBytes(response.data); type = MESSAGE.Rreaddir; body.u32(data.byteLength).bytes(data); break; }
     case 'Rfsync': type = MESSAGE.Rfsync; break;

@@ -13,12 +13,12 @@
     "seabios.bin": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
     "vgabios.bin": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880",
     "vmlinuz-virt": "e7ccc63700a4699d2f3e9ffdd6f71c89c9af18cfb24b92e76972cb1763b7c065",
-    "kcode-initramfs": "66c1d81e1c9d8adcffe8e4e3fe6c96d57768c960ef0030566af51c23a848e009",
-    "alpine-state.bin.zst": "bb6deb15010747bfaf6100b836881b032741eda329da8a7623e9772be2f359cd",
-    "kcode-rootfs.sqfs": "8660059d9417389cd4c4728b4dd47d6d6fd9f73ac3ebebff7f4d5a2953094739"
+    "kcode-initramfs": "27d7f9ad2b73f4060abe68d238160b0db03aabc60f23f854172611bb964a452e",
+    "alpine-state.bin.zst": "bad29491042ae276fd12427f85889fa770a2661b3fd1c6593490015423caed7b",
+    "kcode-rootfs.sqfs": "415e3ef3daffee0e6d411cdbd460c4d6e9032954024813053d2d52c4400dccbe"
   },
   "snapshot": {
     "v86Version": "0.5.458+gd96be77",
-    "assetSetSha256": "9ad2b82d6e741dba2ed3d46a29e11ad624db44c95e6be3b874ee106556ae0eb1"
+    "assetSetSha256": "fc56039ec7f3771597e3f1ef74af5902e8af5da7da01b27378545f958fe5ad8e"
   }
 }

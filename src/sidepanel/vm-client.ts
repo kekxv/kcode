@@ -12,7 +12,10 @@ type WorkerFactory = () => Worker;
 type VMRequestBody =
   | { kind: 'VM_INIT'; session: WorkspaceSession }
   | { kind: 'VM_ATTACH_WORKSPACE'; handle: FileSystemDirectoryHandle }
-  | { kind: 'VM_EXEC'; command: string; timeoutMs: number };
+  | { kind: 'VM_EXEC'; command: string; timeoutMs: number }
+  | { kind: 'VM_BEGIN_TRANSACTION'; transactionId: string }
+  | { kind: 'VM_COMMIT_TRANSACTION' }
+  | { kind: 'VM_ROLLBACK_TRANSACTION' };
 
 const defaultWorkerFactory: WorkerFactory = () =>
   new Worker(new URL('../worker/vm.worker.ts', import.meta.url), { type: 'module' });
@@ -45,6 +48,18 @@ export class VMClient {
 
   exec(command: string, { timeoutMs }: { timeoutMs: number }): Promise<VMExecutionResult> {
     return this.request<VMExecutionResult>({ kind: 'VM_EXEC', command, timeoutMs }, 'result');
+  }
+
+  beginTransaction(transactionId: string): Promise<void> {
+    return this.request<void>({ kind: 'VM_BEGIN_TRANSACTION', transactionId }, 'ready');
+  }
+
+  commitTransaction(): Promise<void> {
+    return this.request<void>({ kind: 'VM_COMMIT_TRANSACTION' }, 'ready');
+  }
+
+  rollbackTransaction(): Promise<void> {
+    return this.request<void>({ kind: 'VM_ROLLBACK_TRANSACTION' }, 'ready');
   }
 
   terminate(reason: string): void {

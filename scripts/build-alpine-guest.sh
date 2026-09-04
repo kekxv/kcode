@@ -26,6 +26,7 @@ fi
 
 mkdir "$staging/rootfs" "$staging/loader" "$staging/output"
 docker export "$container" | tar -xf - -C "$staging/rootfs"
+mkdir -p "$staging/rootfs/work"
 rm -f "$staging/rootfs/.dockerenv" "$staging/rootfs/root/.ash_history" "$staging/rootfs/etc/machine-id"
 rm -rf "$staging/rootfs/tmp"/* "$staging/rootfs/var/cache/apk"/* "$staging/rootfs/var/log"/*
 rm -rf "$staging/rootfs/var/lib/dhcp" "$staging/rootfs/var/lib/NetworkManager" "$staging/rootfs/etc/ssh/ssh_host_"*

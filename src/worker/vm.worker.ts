@@ -6,6 +6,7 @@ const authorizer = new WorkspaceSessionAuthorizer();
 let runtime: V86Runtime | null = null;
 let serialRequestId: string | null = null;
 let lifecycleGeneration = 0;
+let workspaceAttached = false;
 
 const send = (event: VMEvent): void => self.postMessage(event);
 const fail = (requestId: string, code: string, message: string): void =>
@@ -14,6 +15,7 @@ const clearRuntime = (): void => {
   runtime?.destroy();
   runtime = null;
   serialRequestId = null;
+  workspaceAttached = false;
   authorizer.clear();
 };
 const invalidateRuntime = (): number => {
@@ -48,8 +50,10 @@ async function dispatch(value: unknown): Promise<void> {
         const requestIdForDelta = serialRequestId;
         if (isCurrent(generation) && requestIdForDelta) send({ kind: 'VM_OUTPUT_DELTA', requestId: requestIdForDelta, delta });
       });
-      // The snapshot topology is valid only while networking remains offline.
-      await runtime.boot({ useSnapshot: session.network.mode === 'offline' });
+      // A snapshot is captured before any selected directory exists. Workspace
+      // sessions cold-boot so their 9P device and serial shell are live before
+      // a directory handle can be attached.
+      await runtime.boot({ useSnapshot: false });
       if (!isCurrent(generation)) return;
       send({ kind: 'VM_READY', requestId });
     } catch {
@@ -71,6 +75,7 @@ async function dispatch(value: unknown): Promise<void> {
       await runtime?.attachWorkspace(value.handle);
       if (!isCurrent(generation)) return;
       if (!runtime) throw new Error('VM_RUNTIME_NOT_READY');
+      workspaceAttached = true;
       send({ kind: 'VM_READY', requestId });
     } catch {
       fail(requestId, 'VM_ATTACH_FAILED', 'The workspace could not be attached.');
@@ -81,6 +86,27 @@ async function dispatch(value: unknown): Promise<void> {
     invalidateRuntime();
     fail(requestId, 'VM_CANCELLED', 'The VM command was cancelled.');
     self.close();
+    return;
+  }
+  if (value.kind === 'VM_BEGIN_TRANSACTION' || value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') {
+    if (!runtime || !workspaceAttached) {
+      fail(requestId, 'VM_RUNTIME_NOT_READY', 'The workspace must be attached before a transaction can start.');
+      return;
+    }
+    try {
+      if (value.kind === 'VM_BEGIN_TRANSACTION') {
+        const capabilities = authorizer.transactionCapabilities();
+        if (!capabilities) throw new Error('VM_UNAUTHORIZED_REQUEST');
+        runtime.beginTransaction(value.transactionId, capabilities);
+      } else if (value.kind === 'VM_COMMIT_TRANSACTION') {
+        await runtime.commitTransaction();
+      } else {
+        await runtime.rollbackTransaction();
+      }
+      send({ kind: 'VM_READY', requestId });
+    } catch {
+      fail(requestId, 'VM_TRANSACTION_FAILED', 'The workspace transaction could not be completed.');
+    }
     return;
   }
   if (!runtime) {

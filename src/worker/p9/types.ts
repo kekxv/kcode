@@ -45,7 +45,7 @@ export type Rclunk = Tagged & { type: 'Rclunk' };
 export type Rgetattr = Tagged & {
   type: 'Rgetattr'; valid: bigint; qid: Qid; mode: number; uid: number; gid: number; nlink: bigint; rdev: bigint;
   size: bigint; blksize: bigint; blocks: bigint; atimeSec: bigint; atimeNsec: bigint; mtimeSec: bigint;
-  mtimeNsec: bigint; ctimeSec: bigint; ctimeNsec: bigint;
+  mtimeNsec: bigint; ctimeSec: bigint; ctimeNsec: bigint; btimeSec: bigint; btimeNsec: bigint; gen: bigint; dataVersion: bigint;
 };
 export type Rsetattr = Tagged & { type: 'Rsetattr' };
 export type Rreaddir = Tagged & { type: 'Rreaddir'; data: Uint8Array };

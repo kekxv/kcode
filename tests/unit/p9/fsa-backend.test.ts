@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryFsaRoot } from '../../helpers/memory-fsa';
 import { FsaBackend, P9Error } from '../../../src/worker/p9/fsa-backend';
 
@@ -22,5 +22,44 @@ describe('FsaBackend capability confinement', () => {
     await root.getFileHandle('visible.txt', { create: true });
     const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, []);
     await expect(backend.stat(['visible.txt'])).rejects.toMatchObject({ errno: 13 });
+  });
+
+  it('holds a timed-out mutation lock until the underlying FSA operation settles', async () => {
+    // Break caught: Promise.race can report ETIMEDOUT while createWritable still mutates, so releasing this lock permits a concurrent conflicting write.
+    vi.useFakeTimers();
+    try {
+      const root = new MemoryFsaRoot();
+      const original = root.getFileHandle.bind(root);
+      let releaseFirstWrite: (() => void) | undefined;
+      let writableCalls = 0;
+      await original('slow.txt', { create: true });
+      root.getFileHandle = async (name, options) => {
+        const handle = await original(name, options);
+        if (name !== 'slow.txt') return handle;
+        const delayed = Object.create(handle) as FileSystemFileHandle;
+        delayed.createWritable = async (writeOptions) => {
+          writableCalls += 1;
+          if (writableCalls === 1) await new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+          return handle.createWritable(writeOptions);
+        };
+        return delayed;
+      };
+      const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write']);
+
+      const first = backend.write(['slow.txt'], 0, new TextEncoder().encode('first'));
+      const firstError = first.then(() => null, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writableCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await firstError).toMatchObject({ errno: 110 });
+
+      const second = backend.write(['slow.txt'], 0, new TextEncoder().encode('second'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writableCalls).toBe(1);
+      releaseFirstWrite?.();
+      await expect(second).resolves.toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
