@@ -24,6 +24,12 @@ describe('untrusted text defenses', () => {
     // Break caught: BEL, backspace, IND, or RI can still alter the terminal after sanitization.
     expect(sanitizeTerminalChunk('one\u0007\u0008\u0009\n\rtwo\u0084\u008dthree')).toBe('one\n\rtwothree');
   });
+
+  it('removes complete 8-bit OSC, DCS, APC, and PM payloads', () => {
+    // Break caught: stripping only a C1 introducer leaves title or string-control payload text in terminal output.
+    const hostile = 'safe\u009d2;title\u0007osc\u0090secret\u001b\\dcs\u009fapc\u001b\\apc\u009epm\u001b\\done';
+    expect(sanitizeTerminalChunk(hostile)).toBe('safeoscdcsapcdone');
+  });
 });
 
 describe('TerminalManager', () => {

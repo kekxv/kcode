@@ -34,3 +34,7 @@ Four new tests were added and run RED against commit `dd6ad8c` before production
 - A thrown `VM_ATTACH_WORKSPACE` post rejected only that promise while retaining the worker boundary.
 
 GREEN changes wire the relay input to compare the normalized complete URL during active WISP use and call `stopAndRevoke('RELAY_URL_CHANGED')`; track a terminal delivery cursor so only appended chunks are passed to `TerminalManager`; allow only printable text, CR/LF, and approved SGR through the sanitizer; and terminate/clear every VM pending boundary after an attach post failure. Focused regression tests passed after the changes.
+
+## Fix round 2 — 8-bit terminal string controls
+
+The new sanitizer regression was run RED with 8-bit OSC (`\u009d2;title\u0007`), DCS (`\u0090secret\u001b\\`), APC, and PM. The old parser removed only their C1 introducers and leaked the payload text. GREEN routes C1 OSC/DCS/APC/PM introducers into the existing stateful string-removal state, using BEL or ST termination just like the ESC-prefixed forms. Approved SGR and printable/CR/LF behavior remain covered by the existing tests.
