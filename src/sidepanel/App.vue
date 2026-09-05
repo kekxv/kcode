@@ -2,7 +2,7 @@
 import type { InjectionKey } from 'vue';
 import { normalizeRelayUrl, type ConsentContext } from '../security/risk-consent';
 import type { WorkspaceStore } from '../utils/idb-store';
-import type { MemoryProfile } from '../types/protocol';
+import type { ChatProvider, MemoryProfile } from '../types/protocol';
 import type { TabClient } from './tab-client';
 import type { VMClient } from './vm-client';
 import type { RelaySettingsStore } from './relay-settings';
@@ -38,7 +38,7 @@ const services = inject(sidePanelServicesKey);
 if (!services) throw new Error('SIDE_PANEL_SERVICES_UNAVAILABLE');
 const workspace = ref<StoredWorkspace | null>(null);
 const permission = ref<PermissionState | 'unavailable'>('unavailable');
-const tabs = ref<Array<{ id: number; title: string }>>([]);
+const tabs = ref<Array<{ id: number; title: string; provider: ChatProvider }>>([]);
 const selectedTabId = ref<number | null>(null);
 const executionMode = ref<'confirm-each' | 'auto'>('confirm-each');
 const memoryProfile = ref<MemoryProfile>('standard');
@@ -280,7 +280,7 @@ onMounted(() => {
 <template>
   <main class="side-panel">
     <StatusBar :directory="directoryStatus" :vm="vmStatus" :webpage="webpageStatus" :execution="executionMode" :network="networkMode" :capability="currentCapability" :journal="journalStatus" :release="releaseStatus" />
-    <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">DeepSeek 页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.title }}</option></select></label></div>
+    <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">聊天页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.provider }} 页面：{{ tab.title }}</option></select></label></div>
     <NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" />
     <AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" />
     <section v-if="showMemoryProfileWarning" role="dialog" aria-label="高内存冷启动确认"><p>切换到 512 MiB 会冷重启虚拟机，丢失活动命令、工作区挂载、事务和网络状态，并增加浏览器内存占用。</p><button @click="confirmHighMemoryProfile">确认切换到 512 MiB</button><button @click="cancelMemoryProfileChange">取消</button></section>

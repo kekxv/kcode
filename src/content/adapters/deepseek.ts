@@ -14,11 +14,11 @@ export const deepSeekSelectors = {
   assistant: ['[data-message-author-role="assistant"]', '.ds-markdown'],
   stop: ['button[aria-label="停止"]', 'button[aria-label="Stop"]'],
 } as const;
-
-const assistantSelector = deepSeekSelectors.assistant.join(',');
+export type ChatSelectors = { composerRegion: readonly string[]; composer: readonly string[]; send: readonly string[]; assistantList: readonly string[]; assistant: readonly string[]; stop: readonly string[] };
 
 type AnchorMetadata = {
   assistantList: Element;
+  assistantSelector: string;
   chatScope: Element;
   send: HTMLElement;
   preWatchObserver: MutationObserver;
@@ -55,13 +55,13 @@ const isEnabled = (element: Element): element is HTMLElement =>
   && !element.matches(':disabled')
   && element.getAttribute('aria-disabled') !== 'true';
 
-const outermostAssistants = (assistantList: Element, candidates: Iterable<Element>): Element[] =>
+const outermostAssistants = (assistantList: Element, candidates: Iterable<Element>, assistantSelector: string): Element[] =>
   [...new Set(candidates)].filter((candidate) => {
     const parent = candidate.parentElement?.closest(assistantSelector);
     return !parent || !assistantList.contains(parent);
   });
 
-const addAssistantCandidates = (node: Node, candidates: Set<Element>): void => {
+const addAssistantCandidates = (node: Node, candidates: Set<Element>, assistantSelector: string): void => {
   const addWithAncestors = (element: Element): void => {
     let assistant: Element | null = element.matches(assistantSelector)
       ? element
@@ -171,21 +171,22 @@ const readBoundedText = (element: Element, maximumBytes: number): { text: string
 export class DeepSeekAdapter implements SiteAdapter {
   private readonly anchorMetadata = new WeakMap<ResponseAnchor, AnchorMetadata>();
 
-  constructor(private readonly document: Document = window.document) {}
+  constructor(private readonly document: Document = window.document, private readonly selectors: ChatSelectors = deepSeekSelectors) {}
 
   async sendPrompt(prompt: string, signal: AbortSignal): Promise<ResponseAnchor> {
     if (signal.aborted) throw aborted();
-    const region = selectPreferred(this.document, deepSeekSelectors.composerRegion, isVisible);
-    const composer = selectOne(region, deepSeekSelectors.composer, (element) => isVisible(element) && isEnabled(element));
-    const send = selectOne(region, deepSeekSelectors.send, (element) => isVisible(element) && isEnabled(element));
+    const region = selectPreferred(this.document, this.selectors.composerRegion, isVisible);
+    const composer = selectOne(region, this.selectors.composer, (element) => isVisible(element) && isEnabled(element));
+    const send = selectOne(region, this.selectors.send, (element) => isVisible(element) && isEnabled(element));
     if (!(composer instanceof HTMLElement) || !(send instanceof HTMLElement)) throw domChanged();
-    const assistantList = selectPreferred(this.document, deepSeekSelectors.assistantList, isVisible);
+    const assistantList = selectPreferred(this.document, this.selectors.assistantList, isVisible);
     const chatScope = commonAncestor(region, assistantList);
     const assistantCandidates = new Set<Element>();
-    for (const selector of deepSeekSelectors.assistant) {
+    for (const selector of this.selectors.assistant) {
       for (const assistant of assistantList.querySelectorAll(selector)) assistantCandidates.add(assistant);
     }
-    const existingAssistantNodes = new Set<Element>(outermostAssistants(assistantList, assistantCandidates));
+    const assistantSelector = this.selectors.assistant.join(',');
+    const existingAssistantNodes = new Set<Element>(outermostAssistants(assistantList, assistantCandidates, assistantSelector));
 
     if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
       setNativeValue(composer, prompt);
@@ -200,8 +201,8 @@ export class DeepSeekAdapter implements SiteAdapter {
     const preWatchCandidates = new Set<Element>();
     const preWatchObserver = new MutationObserver((records) => {
       for (const record of records) {
-        addAssistantCandidates(record.target, preWatchCandidates);
-        for (const node of record.addedNodes) addAssistantCandidates(node, preWatchCandidates);
+        addAssistantCandidates(record.target, preWatchCandidates, assistantSelector);
+        for (const node of record.addedNodes) addAssistantCandidates(node, preWatchCandidates, assistantSelector);
       }
     });
     const preWatchAbort = (): void => preWatchObserver.disconnect();
@@ -209,6 +210,7 @@ export class DeepSeekAdapter implements SiteAdapter {
     signal.addEventListener('abort', preWatchAbort, { once: true });
     const metadata: AnchorMetadata = {
       assistantList,
+      assistantSelector,
       chatScope,
       send,
       preWatchObserver,
@@ -339,8 +341,8 @@ export class DeepSeekAdapter implements SiteAdapter {
       };
       const collectAssistants = (node: Node): void => {
         const candidates = new Set<Element>();
-        addAssistantCandidates(node, candidates);
-        for (const assistant of outermostAssistants(metadata.assistantList, candidates)) readAssistant(assistant);
+        addAssistantCandidates(node, candidates, metadata.assistantSelector);
+        for (const assistant of outermostAssistants(metadata.assistantList, candidates, metadata.assistantSelector)) readAssistant(assistant);
       };
       const onAbort = (): void => finish(aborted());
       const observer = new MutationObserver((records) => {
@@ -367,13 +369,13 @@ export class DeepSeekAdapter implements SiteAdapter {
       }
       try {
         for (const record of metadata.preWatchObserver.takeRecords()) {
-          addAssistantCandidates(record.target, metadata.preWatchCandidates);
-          for (const node of record.addedNodes) addAssistantCandidates(node, metadata.preWatchCandidates);
+          addAssistantCandidates(record.target, metadata.preWatchCandidates, metadata.assistantSelector);
+          for (const node of record.addedNodes) addAssistantCandidates(node, metadata.preWatchCandidates, metadata.assistantSelector);
         }
         metadata.preWatchObserver.disconnect();
         metadata.preWatchSignal.removeEventListener('abort', metadata.preWatchAbort);
         signal.addEventListener('abort', onAbort, { once: true });
-        for (const assistant of outermostAssistants(metadata.assistantList, metadata.preWatchCandidates)) readAssistant(assistant);
+        for (const assistant of outermostAssistants(metadata.assistantList, metadata.preWatchCandidates, metadata.assistantSelector)) readAssistant(assistant);
       } catch (error) {
         finish(error instanceof AdapterError ? error : domChanged());
       }
@@ -382,7 +384,7 @@ export class DeepSeekAdapter implements SiteAdapter {
 
   private findVisibleStop(scope: Element): HTMLElement | null {
     const stops = new Set<HTMLElement>();
-    for (const selector of deepSeekSelectors.stop) {
+    for (const selector of this.selectors.stop) {
       for (const element of scope.querySelectorAll(selector)) {
         if (isVisible(element) && isEnabled(element)) stops.add(element);
       }

@@ -3,15 +3,32 @@ import { PortRouter } from '../../src/background/port-router';
 
 type Listener<T> = { addListener: (listener: T) => void };
 
-const makePort = (name: string, tabId?: number) => ({
+const makePort = (name: string, tabId?: number, url?: string) => ({
   name,
-  sender: tabId === undefined ? {} : { tab: { id: tabId } },
+  sender: tabId === undefined ? {} : { tab: { id: tabId }, url },
   postMessage: vi.fn(),
   onMessage: { addListener: vi.fn() } as Listener<(message: unknown) => void>,
   onDisconnect: { addListener: vi.fn() } as Listener<() => void>,
 });
 
 describe('PortRouter', () => {
+  it('labels connected tabs from the trusted content-port origin', async () => {
+    // Break caught: the side panel displays a provider name supplied by untrusted page DOM rather than browser-owned sender URL.
+    const sidePanel = makePort('kcode-sidepanel');
+    const chatGpt = makePort('kcode-content', 8, 'https://chatgpt.com/c/example');
+    const router = new PortRouter({ tabs: { get: vi.fn() } });
+    router.setSidePanelPort(sidePanel as never);
+    router.setContentPort(chatGpt as never);
+
+    await router.fromSidePanel({ protocolVersion: 1, kind: 'SIDE_PANEL_LIST_CONNECTED_TABS', requestId: 'list-tabs' });
+
+    expect(sidePanel.postMessage).toHaveBeenCalledWith({
+      protocolVersion: 1,
+      kind: 'SIDE_PANEL_CONNECTED_TABS',
+      requestId: 'list-tabs',
+      tabs: [{ tabId: 8, title: 'ChatGPT', provider: 'ChatGPT' }],
+    });
+  });
   it('forwards an authenticated side-panel cancellation only to the matching pending content request', async () => {
     // Break caught: local cancellation without router cleanup leaves the page observer streaming into a later task.
     const sidePanel = makePort('kcode-sidepanel');

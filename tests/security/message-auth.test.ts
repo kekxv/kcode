@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isTrustedDeepSeekSender, isTrustedSidePanelSender, PortRouter } from '../../src/background/port-router';
+import { isTrustedChatSender, isTrustedSidePanelSender, PortRouter } from '../../src/background/port-router';
 
 const extensionId = 'trusted-extension';
 const panelUrl = `chrome-extension://${extensionId}/src/sidepanel/index.html`;
@@ -24,19 +24,21 @@ const makePort = (name: string, portSender: Record<string, unknown>) => ({
 afterEach(() => vi.unstubAllGlobals());
 
 describe('extension message authentication', () => {
-  it('accepts only this extension side panel and a top-frame DeepSeek sender', () => {
+  it('accepts only this extension side panel and a top-frame sender from an exact supported chat origin', () => {
     vi.stubGlobal('chrome', { runtime: { id: extensionId, getURL: vi.fn().mockReturnValue(panelUrl) } });
     expect(isTrustedSidePanelSender(sender({ url: panelUrl }) as chrome.runtime.MessageSender)).toBe(true);
     expect(isTrustedSidePanelSender(sender({ url: `${panelUrl}?lookalike` }) as chrome.runtime.MessageSender)).toBe(false);
-    expect(isTrustedDeepSeekSender(sender() as chrome.runtime.MessageSender)).toBe(true);
+    for (const origin of ['https://chat.deepseek.com', 'https://chat.qwen.ai', 'https://aistudio.google.com', 'https://chatgpt.com']) {
+      expect(isTrustedChatSender(sender({ origin, url: `${origin}/` }) as chrome.runtime.MessageSender)).toBe(true);
+    }
 
     for (const invalid of [
       sender({ id: 'foreign-extension' }),
       sender({ origin: 'https://evil.example', url: 'https://evil.example/' }),
       sender({ frameId: 1 }),
-      sender({ url: 'https://chat.deepseek.com.evil.example/' }),
+      sender({ url: 'https://chat.qwen.ai.evil.example/' }),
     ]) {
-      expect(isTrustedDeepSeekSender(invalid as chrome.runtime.MessageSender)).toBe(false);
+      expect(isTrustedChatSender(invalid as chrome.runtime.MessageSender)).toBe(false);
     }
   });
 

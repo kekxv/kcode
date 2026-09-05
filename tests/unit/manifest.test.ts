@@ -6,7 +6,13 @@ describe('manifest', () => {
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.side_panel.default_path).toBe('src/sidepanel/index.html');
     expect(manifest.permissions).toEqual(['sidePanel', 'storage']);
-    expect(manifest.host_permissions).toEqual(['https://chat.deepseek.com/*']);
+    expect(manifest.host_permissions).toEqual([
+      'https://chat.deepseek.com/*',
+      'https://chat.qwen.ai/*',
+      'https://aistudio.google.com/*',
+      'https://chatgpt.com/*',
+    ]);
+    expect(manifest.content_scripts[0].matches).toEqual(manifest.host_permissions);
     expect(manifest).not.toHaveProperty('optional_host_permissions');
     expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|activeTab|"tabs"/);
     expect(manifest.content_security_policy.extension_pages).toBe(

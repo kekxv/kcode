@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { expect, test, chromium, type BrowserContext } from 'playwright/test';
@@ -34,4 +34,17 @@ test('loads the packaged extension and renders the safe initial side panel', asy
     await context?.close();
     await rm(profile, { recursive: true, force: true });
   }
+});
+
+test('packages content scripts only for the supported chat origins', async () => {
+  const manifest = JSON.parse(await readFile(join(extensionPath, 'manifest.json'), 'utf8')) as {
+    host_permissions: string[];
+    content_scripts: Array<{ matches: string[] }>;
+  };
+  const expected = [
+    'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*',
+    'https://aistudio.google.com/*', 'https://chatgpt.com/*',
+  ];
+  expect(manifest.host_permissions).toEqual(expected);
+  expect(manifest.content_scripts[0]?.matches).toEqual(expected);
 });

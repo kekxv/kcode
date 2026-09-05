@@ -65,11 +65,12 @@ export type SidePanelAbortCommand = {
 };
 
 export type SidePanelCommand = SidePanelPromptCommand | SidePanelListTabsCommand | SidePanelAbortCommand;
+export type ChatProvider = 'DeepSeek' | 'Qwen' | 'Google AI Studio' | 'ChatGPT';
 export type SidePanelEvent = {
   protocolVersion: 1;
   kind: 'SIDE_PANEL_CONNECTED_TABS';
   requestId: string;
-  tabs: Array<{ tabId: number; title: string }>;
+  tabs: Array<{ tabId: number; title: string; provider: ChatProvider }>;
 };
 
 export type ContentSendPromptCommand = {
@@ -140,6 +141,8 @@ const hasExactKeys = (value: RecordValue, keys: readonly string[]): boolean => {
 };
 
 const isId = (value: unknown): value is string => typeof value === 'string' && ID.test(value);
+const isChatProvider = (value: unknown): value is ChatProvider =>
+  value === 'DeepSeek' || value === 'Qwen' || value === 'Google AI Studio' || value === 'ChatGPT';
 const isFiniteInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value);
 const bytesAtMost = (value: unknown, maximum: number): value is string =>
@@ -201,10 +204,11 @@ export const isSidePanelEvent = (value: unknown): value is SidePanelEvent =>
   && value.kind === 'SIDE_PANEL_CONNECTED_TABS'
   && Array.isArray(value.tabs)
   && value.tabs.every((tab) => isRecord(tab)
-    && hasExactKeys(tab, ['tabId', 'title'])
+    && hasExactKeys(tab, ['tabId', 'title', 'provider'])
     && isFiniteInteger(tab.tabId)
     && tab.tabId >= 0
-    && bytesAtMost(tab.title, MAX_PORT_BYTES));
+    && bytesAtMost(tab.title, MAX_PORT_BYTES)
+    && isChatProvider(tab.provider));
 
 export const isContentCommand = (value: unknown): value is ContentCommand =>
   isRecord(value)

@@ -44,10 +44,10 @@ describe('Side Panel shell', () => {
     const client = new TabClient(() => port as unknown as chrome.runtime.Port);
     const pending = client.listConnectedTabs();
     const request = port.postMessage.mock.calls[0][0] as { requestId: string };
-    listener?.({ protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: 'wrong', tabs: [{ tabId: 4, title: 'Wrong' }] });
-    listener?.({ protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: request.requestId, tabs: [{ tabId: 7, title: 'DeepSeek' }] });
+    listener?.({ protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: 'wrong', tabs: [{ tabId: 4, title: 'Wrong', provider: 'ChatGPT' }] });
+    listener?.({ protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: request.requestId, tabs: [{ tabId: 7, title: 'DeepSeek', provider: 'DeepSeek' }] });
 
-    await expect(pending).resolves.toEqual([{ id: 7, title: 'DeepSeek' }]);
+    await expect(pending).resolves.toEqual([{ id: 7, title: 'DeepSeek', provider: 'DeepSeek' }]);
   });
 
   it('cancels the matching page request when its AbortSignal fires', async () => {

@@ -4,7 +4,12 @@
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage"],
-  "host_permissions": ["https://chat.deepseek.com/*"],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://chat.qwen.ai/*",
+    "https://aistudio.google.com/*",
+    "https://chatgpt.com/*"
+  ],
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
@@ -20,7 +25,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chat.deepseek.com/*"],
+    "matches": [
+      "https://chat.deepseek.com/*",
+      "https://chat.qwen.ai/*",
+      "https://aistudio.google.com/*",
+      "https://chatgpt.com/*"
+    ],
       "js": ["src/content/index.ts"],
       "run_at": "document_idle",
       "all_frames": false,

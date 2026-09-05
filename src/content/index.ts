@@ -1,6 +1,6 @@
 import { isContentCommand, type ContentCommand, type ContentEvent } from '../types/protocol';
 import { AdapterError, type SiteAdapter } from './adapters/base';
-import { DeepSeekAdapter } from './adapters/deepseek';
+import { adapterForOrigin } from './adapters/registry';
 
 const CONTENT_PORT = 'kcode-content';
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -70,7 +70,7 @@ export class ContentController {
     if (this.terminalIds.has(message.requestId)) return;
     if (this.active) {
       if (this.active.requestId === message.requestId) return;
-      this.postError(message.requestId, 'CONTENT_BUSY', 'A DeepSeek request is already active.');
+      this.postError(message.requestId, 'CONTENT_BUSY', 'A chat-page request is already active.');
       return;
     }
     void this.run(message);
@@ -114,7 +114,7 @@ export class ContentController {
       }
       this.clearActive(active);
       const adapterError = error instanceof AdapterError ? error : undefined;
-      this.postError(command.requestId, adapterError?.code ?? 'ADAPTER_DOM_CHANGED', adapterError?.message ?? 'DeepSeek page controls changed.');
+      this.postError(command.requestId, adapterError?.code ?? 'ADAPTER_DOM_CHANGED', adapterError?.message ?? 'Chat page controls changed.');
     }
   }
 
@@ -126,10 +126,10 @@ export class ContentController {
     active.controller.abort();
     if (code) {
       const message = code === 'CONTENT_TIMEOUT'
-        ? 'The DeepSeek request timed out.'
+        ? 'The chat-page request timed out.'
         : code === 'CONTENT_SESSION_REPLACED'
           ? 'The authenticated router session was replaced.'
-          : 'The DeepSeek page was replaced.';
+          : 'The chat page was replaced.';
       this.postError(active.requestId, code, message);
     }
   }
@@ -167,6 +167,9 @@ const canBootContentScript = (): boolean =>
   && window.top === window;
 
 if (canBootContentScript()) {
-  const port = chrome.runtime.connect({ name: CONTENT_PORT });
-  new ContentController(port, new DeepSeekAdapter(document)).start();
+  const adapter = adapterForOrigin(window.location.origin, document);
+  if (adapter) {
+    const port = chrome.runtime.connect({ name: CONTENT_PORT });
+    new ContentController(port, adapter).start();
+  }
 }

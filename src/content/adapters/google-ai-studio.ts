@@ -1,0 +1,3 @@
+import { DeepSeekAdapter, type ChatSelectors } from './deepseek';
+export const googleAiStudioSelectors: ChatSelectors = { composerRegion: ['main form', '[data-google-composer]'], composer: ['textarea[data-google-composer]', 'textarea', '[contenteditable="true"][role="textbox"]'], send: ['button[data-google-send]', 'button[aria-label="Send"]', 'button[aria-label="发送"]'], assistantList: ['[data-google-messages]', 'main'], assistant: ['[data-message-author-role="assistant"]', '[data-role="model"]'], stop: ['button[aria-label="Stop"]', 'button[aria-label="停止"]'] };
+export class GoogleAiStudioAdapter extends DeepSeekAdapter { constructor(document: Document = window.document) { super(document, googleAiStudioSelectors); } }

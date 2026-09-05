@@ -1,0 +1,3 @@
+import { DeepSeekAdapter, type ChatSelectors } from './deepseek';
+export const qwenSelectors: ChatSelectors = { composerRegion: ['main form', '[data-qwen-composer]'], composer: ['textarea[data-qwen-composer]', 'textarea', '[contenteditable="true"][role="textbox"]'], send: ['button[data-qwen-send]', 'button[aria-label="Send"]', 'button[aria-label="发送"]'], assistantList: ['[data-qwen-messages]', 'main'], assistant: ['[data-message-author-role="assistant"]', '[data-role="assistant"]'], stop: ['button[aria-label="Stop"]', 'button[aria-label="停止"]'] };
+export class QwenAdapter extends DeepSeekAdapter { constructor(document: Document = window.document) { super(document, qwenSelectors); } }

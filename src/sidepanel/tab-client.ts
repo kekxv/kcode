@@ -3,9 +3,10 @@ import {
   isRoutedContentEvent,
   isSidePanelEvent,
   type RoutedContentEvent,
+  type ChatProvider,
 } from '../types/protocol';
 
-export type ConnectedTab = { id: number; title: string };
+export type ConnectedTab = { id: number; title: string; provider: ChatProvider };
 export type PromptHandlers = {
   onDelta?: (delta: string) => void;
   onDone?: () => void;
@@ -88,7 +89,7 @@ export class TabClient {
       const pending = this.pending.get(message.requestId);
       if (!pending || pending.kind !== 'list') return;
       this.pending.delete(message.requestId);
-      pending.resolve(message.tabs.map((tab) => ({ id: tab.tabId, title: tab.title })));
+      pending.resolve(message.tabs.map((tab) => ({ id: tab.tabId, title: tab.title, provider: tab.provider })));
       return;
     }
     if (!isRoutedContentEvent(message)) return;

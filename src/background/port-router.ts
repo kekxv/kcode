@@ -7,11 +7,17 @@ import {
   type RoutedContentEvent,
   type SidePanelCommand,
   type SidePanelEvent,
+  type ChatProvider,
 } from '../types/protocol';
 
 const SIDE_PANEL_PORT = 'kcode-sidepanel';
 const CONTENT_PORT = 'kcode-content';
-const DEEPSEEK_ORIGIN = 'https://chat.deepseek.com';
+export const SUPPORTED_CHAT_ORIGINS = new Set([
+  'https://chat.deepseek.com',
+  'https://chat.qwen.ai',
+  'https://aistudio.google.com',
+  'https://chatgpt.com',
+]);
 
 const safeOrigin = (url: string | undefined): string | null => {
   try {
@@ -21,15 +27,29 @@ const safeOrigin = (url: string | undefined): string | null => {
   }
 };
 
+const providerForUrl = (url: string | undefined): ChatProvider | null => {
+  switch (safeOrigin(url)) {
+    case 'https://chat.deepseek.com': return 'DeepSeek';
+    case 'https://chat.qwen.ai': return 'Qwen';
+    case 'https://aistudio.google.com': return 'Google AI Studio';
+    case 'https://chatgpt.com': return 'ChatGPT';
+    default: return null;
+  }
+};
+
 export const isTrustedSidePanelSender = (sender: chrome.runtime.MessageSender): boolean =>
   sender.id === chrome.runtime.id
   && sender.url === chrome.runtime.getURL('src/sidepanel/index.html');
 
-export const isTrustedDeepSeekSender = (sender: chrome.runtime.MessageSender): boolean =>
+export const isTrustedChatSender = (sender: chrome.runtime.MessageSender): boolean =>
   sender.id === chrome.runtime.id
   && sender.frameId === 0
-  && sender.origin === DEEPSEEK_ORIGIN
-  && safeOrigin(sender.url) === DEEPSEEK_ORIGIN;
+  && typeof sender.origin === 'string'
+  && SUPPORTED_CHAT_ORIGINS.has(sender.origin)
+  && safeOrigin(sender.url) === sender.origin;
+
+/** Backward-compatible name for callers compiled against the initial DeepSeek-only release. */
+export const isTrustedDeepSeekSender = isTrustedChatSender;
 
 type RouterDependencies = {
   tabs: Pick<typeof chrome.tabs, 'get'>;
@@ -43,7 +63,7 @@ type PendingRequest = {
 };
 
 const isDeepSeekTab = (tab: chrome.tabs.Tab, targetTabId: number): boolean =>
-  tab.id === targetTabId && safeOrigin(tab.url) === DEEPSEEK_ORIGIN;
+  tab.id === targetTabId && SUPPORTED_CHAT_ORIGINS.has(safeOrigin(tab.url) ?? '');
 
 const isTabId = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -85,7 +105,10 @@ export class PortRouter {
     const sidePanel = this.sidePanel;
     if (message.kind === 'SIDE_PANEL_LIST_CONNECTED_TABS') {
       const tabs: SidePanelEvent['tabs'] = [...this.contents.entries()]
-        .map(([tabId, port]) => ({ tabId, title: port.sender?.tab?.title ?? 'DeepSeek' }))
+        .flatMap(([tabId, port]) => {
+          const provider = providerForUrl(port.sender?.url);
+          return provider ? [{ tabId, title: port.sender?.tab?.title ?? provider, provider }] : [];
+        })
         .sort((left, right) => left.tabId - right.tabId);
       this.tryPost(sidePanel, { protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: message.requestId, tabs });
       return;
@@ -173,7 +196,7 @@ export class PortRouter {
       });
       return;
     }
-    if (port.name === CONTENT_PORT && sender && isTrustedDeepSeekSender(sender)) {
+    if (port.name === CONTENT_PORT && sender && isTrustedChatSender(sender)) {
       const tabId = sender.tab?.id;
       if (!isTabId(tabId)) return;
       this.setContentPort(port);
