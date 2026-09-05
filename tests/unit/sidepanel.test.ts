@@ -14,7 +14,7 @@ const fakeServices = (ready = false): SidePanelServices => {
       getPermission: vi.fn().mockResolvedValue(ready ? 'granted' : 'prompt'),
       requestReadWrite: vi.fn().mockResolvedValue('granted'),
     },
-    tab: { listConnectedTabs: vi.fn().mockResolvedValue(ready ? [{ id: 7, title: 'DeepSeek' }] : []), sendPrompt: vi.fn() },
+    tab: { listConnectedTabs: vi.fn().mockResolvedValue(ready ? [{ id: 7, title: 'DeepSeek', provider: 'DeepSeek' as const }] : []), sendPrompt: vi.fn() },
     vm: {
       terminate: vi.fn(), selectMemoryProfile: vi.fn(), attachWorkspace: vi.fn(async () => undefined), start: vi.fn(async () => undefined), subscribe: vi.fn(() => () => {}),
       beginTransaction: vi.fn(async (next: string) => { transactionId = next; }),
@@ -26,7 +26,7 @@ const fakeServices = (ready = false): SidePanelServices => {
     consent: { grant: vi.fn(), hasValid: vi.fn().mockResolvedValue(false), revokeAll: vi.fn() },
     relaySettings: { load: vi.fn().mockResolvedValue(null), save: vi.fn(async (value: string) => value), clear: vi.fn() },
     agentSettings: { load: vi.fn().mockResolvedValue(''), save: vi.fn(async (value: string) => value), clear: vi.fn() },
-    workspaceHistory: { load: vi.fn().mockResolvedValue([]), append: vi.fn(), clear: vi.fn() },
+    workspaceHistory: { load: vi.fn().mockResolvedValue([]), append: vi.fn(), clear: vi.fn(), loadRecovery: vi.fn().mockResolvedValue(null), saveRecovery: vi.fn(), clearRecovery: vi.fn() },
   };
 };
 
@@ -122,6 +122,34 @@ describe('Side Panel shell', () => {
     const record = (services.workspaceHistory.append as ReturnType<typeof vi.fn>).mock.calls[0][1] as { task: string };
     expect(record.task).toContain('[REDACTED:github-token]');
     expect(record.task).not.toContain('ghp_12345678901234567890');
+  });
+
+  it('offers an interrupted checkpoint only after a user confirms resume', async () => {
+    // Break caught: panel reload either loses an interrupted task or silently
+    // sends its continuation to a chat page without a fresh user gesture.
+    const services = fakeServices(true);
+    const recovery = services.workspaceHistory as typeof services.workspaceHistory & { loadRecovery: ReturnType<typeof vi.fn> };
+    recovery.loadRecovery = vi.fn().mockResolvedValue({ updatedAt: 1, provider: 'DeepSeek', task: '继续整理需求', phase: 'running', summary: '已完成目录检查' });
+    services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('恢复完成'); });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+
+    expect((await screen.findByRole('region', { name: '恢复上次任务' })).textContent).toContain('继续整理需求');
+    expect(services.tab.sendPrompt).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: '恢复任务' }));
+    await waitFor(() => expect(services.tab.sendPrompt).toHaveBeenCalledOnce());
+    expect((services.tab.sendPrompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toContain('继续整理需求');
+  });
+
+  it('removes the visible recovery offer when the user clears .session history', async () => {
+    // Break caught: deleting the SQLite file leaves a stale resume button that
+    // advertises a checkpoint no longer present in the selected workspace.
+    const services = fakeServices(true);
+    services.workspaceHistory.loadRecovery = vi.fn().mockResolvedValue({ updatedAt: 1, provider: 'DeepSeek', task: 'interrupted', phase: 'running', summary: 'checkpoint' });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await screen.findByRole('region', { name: '恢复上次任务' });
+    await fireEvent.click(screen.getByRole('button', { name: '启用工作记录（写入 .session）' }));
+    await fireEvent.click(screen.getByRole('button', { name: '清除工作记录' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: '恢复上次任务' })).toBeNull());
   });
 
   it('saves supplemental instructions and attaches them to the next task only after fixed safety policy', async () => {

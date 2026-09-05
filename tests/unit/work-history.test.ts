@@ -52,4 +52,21 @@ describe('WorkHistoryStore', () => {
     await expect(store.load(root as unknown as FileSystemDirectoryHandle)).resolves.toEqual([]);
     await expect(root.getDirectoryHandle('.session')).rejects.toMatchObject({ name: 'NotFoundError' });
   });
+
+  it('persists a redacted resumable checkpoint separately from audit history', async () => {
+    // Break caught: a browser restart loses the task that was in progress, or
+    // a checkpoint is confused with a completed audit record.
+    const root = new MemoryFsaRoot(); const store = new WorkspaceHistoryStore();
+    const checkpoint = {
+      updatedAt: 1,
+      provider: 'Qwen' as const,
+      task: '继续处理 [REDACTED:github-token]',
+      phase: 'running' as const,
+      summary: '已写入 notes.txt',
+    };
+    await store.saveRecovery(root as unknown as FileSystemDirectoryHandle, checkpoint);
+    await expect(store.loadRecovery(root as unknown as FileSystemDirectoryHandle)).resolves.toEqual(checkpoint);
+    await store.clearRecovery(root as unknown as FileSystemDirectoryHandle);
+    await expect(store.loadRecovery(root as unknown as FileSystemDirectoryHandle)).resolves.toBeNull();
+  });
 });

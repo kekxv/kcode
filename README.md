@@ -60,6 +60,10 @@ The Agent may use a `fetch` tool call for HTTPS retrieval. It runs as a bounded 
 
 Use **启用工作记录（写入 .session）** to explicitly grant optional history writing. Completed tasks are then stored, after the same secret redaction and size bound used for tool results, in `.session/kcode-history.sqlite` inside the selected directory. Opening the Side Panel never creates this folder or database. `.session/` is ignored by this repository's Git configuration. Use **清除工作记录** to remove the SQLite history file.
 
+### Restart recovery
+
+When optional `.session` writing is enabled, kcode saves a redacted checkpoint before each task starts. After a browser or Side Panel restart, an interrupted checkpoint is shown as **恢复上次任务**. It never sends automatically: select the matching provider page and click **恢复任务**. The restored prompt includes the original task and its last saved summary, and instructs the page AI to inspect `/work` before continuing. Auto mode, WISP networking, VM processes, pending tool approvals, and uncommitted transactions are deliberately not restored; their consent and review boundaries start fresh.
+
 ## Checks
 
 ```sh

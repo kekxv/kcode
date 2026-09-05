@@ -7,7 +7,7 @@ import type { TabClient } from './tab-client';
 import type { VMClient } from './vm-client';
 import type { RelaySettingsStore } from './relay-settings';
 import type { AgentSettingsStore } from './agent-settings';
-import type { WorkspaceHistoryStore } from './workspace-history';
+import type { RecoveryCheckpoint, WorkspaceHistoryStore } from './workspace-history';
 import type { WorkRecord } from './work-history';
 export type SidePanelServices = {
   workspace: Pick<WorkspaceStore, 'load' | 'selectDirectory' | 'getPermission' | 'requestReadWrite'>;
@@ -16,7 +16,7 @@ export type SidePanelServices = {
   consent: { grant(modes: readonly ('auto' | 'workspace-networked')[], context: ConsentContext): Promise<void>; hasValid(mode: 'auto' | 'workspace-networked', context: ConsentContext): Promise<boolean>; revokeAll(): Promise<void> };
   relaySettings: Pick<RelaySettingsStore, 'load' | 'save' | 'clear'>;
   agentSettings: Pick<AgentSettingsStore, 'load' | 'save' | 'clear'>;
-  workspaceHistory: Pick<WorkspaceHistoryStore, 'load' | 'append' | 'clear'>;
+  workspaceHistory: Pick<WorkspaceHistoryStore, 'load' | 'append' | 'clear' | 'loadRecovery' | 'saveRecovery' | 'clearRecovery'>;
 };
 export const sidePanelServicesKey: InjectionKey<SidePanelServices> = Symbol('sidePanelServices');
 </script>
@@ -54,6 +54,7 @@ const customInstructions = ref(''); const customInstructionsError = ref<string |
 const messages = ref<string[]>([]); const terminalChunks = ref<string[]>([]); const busy = ref(false);
 const workHistory = ref<readonly WorkRecord[]>([]);
 const historyEnabled = ref(false); const historyError = ref<string | null>(null);
+const recovery = ref<RecoveryCheckpoint | null>(null); const recoveryError = ref<string | null>(null);
 const historyGuard = new DefaultResultGuard();
 const agentState = ref('idle');
 type ToolDecision = { call: ToolCall; finish: (authorization: ToolAuthorization | null) => void };
@@ -75,18 +76,20 @@ const releaseStatus = computed(() => pendingRelease.value ? '等待发送批准'
 const relayOrigin = computed(() => { try { return relayUrl.value ? new URL(relayUrl.value).origin : '离线'; } catch { return '无效中继'; } });
 const refreshWorkspace = async (): Promise<void> => { workspace.value = await services.workspace.load(); permission.value = workspace.value ? await services.workspace.getPermission() : 'unavailable'; };
 const refreshWorkHistory = async (): Promise<void> => { if (workspace.value) workHistory.value = await services.workspaceHistory.load(workspace.value.handle); };
-const enableWorkHistory = async (): Promise<void> => {
-  if (!workspace.value) return;
+const refreshRecovery = async (): Promise<void> => { if (workspace.value) recovery.value = await services.workspaceHistory.loadRecovery(workspace.value.handle); };
+const enableWorkHistory = async (): Promise<boolean> => {
+  if (!workspace.value) return false;
   historyError.value = null;
   try {
     if (await services.workspace.requestReadWrite() !== 'granted') throw new Error('DIRECTORY_PERMISSION_DENIED');
     historyEnabled.value = true;
     await refreshWorkHistory();
-  } catch { historyError.value = '未获得写入工作目录 .session 的授权；任务仍可正常运行。'; }
+    return true;
+  } catch { historyError.value = '未获得写入工作目录 .session 的授权；任务仍可正常运行。'; return false; }
 };
 const clearWorkHistory = async (): Promise<void> => {
   if (!workspace.value || !historyEnabled.value) return;
-  try { await services.workspaceHistory.clear(workspace.value.handle); workHistory.value = []; } catch { historyError.value = '清除工作记录失败。'; }
+  try { await services.workspaceHistory.clear(workspace.value.handle); workHistory.value = []; recovery.value = null; } catch { historyError.value = '清除工作记录失败。'; }
 };
 const refreshTabs = async (): Promise<void> => { tabs.value = await services.tab.listConnectedTabs(); selectedTabId.value = tabs.value.length === 1 ? tabs.value[0].id : null; };
 const isCurrentAuthorityGeneration = (generation: number): boolean => generation === authorityGeneration;
@@ -112,6 +115,8 @@ const chooseDirectory = async (): Promise<void> => {
   workspace.value = await selection;
   permission.value = await services.workspace.getPermission();
   historyEnabled.value = false;
+  recovery.value = null;
+  void refreshRecovery().catch(() => { recoveryError.value = '读取可恢复任务失败。'; });
 };
 const applyMemoryProfile = async (profile: MemoryProfile): Promise<void> => {
   if (profile === memoryProfile.value) return;
@@ -278,10 +283,28 @@ const rejectTool = (): void => pendingTool.value?.finish(null);
 const decideChanges = (decision: ChangeDecision): void => pendingChanges.value?.finish(decision);
 const decideRelease = (approved: boolean): void => pendingRelease.value?.finish(approved);
 const stopTask = (): void => { void stopAndRevoke('USER_STOP'); };
+const resumeRecovery = async (): Promise<void> => {
+  const checkpoint = recovery.value;
+  if (!checkpoint) return;
+  recoveryError.value = null;
+  if (!await enableWorkHistory()) { recoveryError.value = '恢复任务需要重新确认对 .session 的写入授权。'; return; }
+  const tab = tabs.value.find((candidate) => candidate.id === selectedTabId.value);
+  if (!tab || tab.provider !== checkpoint.provider) { recoveryError.value = `请选择 ${checkpoint.provider} 页面后再恢复。`; return; }
+  await submit(`继续此前被重启中断的任务。\n原任务：${checkpoint.task}\n已保存进度：${checkpoint.summary}\n请检查当前工作区后继续，不要假定未确认的工具调用已经执行。`);
+};
 const submit = async (prompt: string): Promise<void> => {
   if (!canSubmit.value || selectedTabId.value === null || !workspace.value || !orchestrator) return;
   busy.value = true;
   messages.value.push(prompt);
+  const selected = tabs.value.find((tab) => tab.id === selectedTabId.value);
+  const guardedTask = historyGuard.redact({ text: prompt, exitCode: null, truncated: false, durationMs: 0 }).redactedText;
+  if (historyEnabled.value && selected) {
+    try {
+      const checkpoint: RecoveryCheckpoint = { updatedAt: Date.now(), provider: selected.provider, task: guardedTask, phase: 'running', summary: '任务已启动；重启后请确认恢复。' };
+      await services.workspaceHistory.saveRecovery(workspace.value.handle, checkpoint);
+      recovery.value = checkpoint;
+    } catch { historyError.value = '保存恢复状态失败；任务仍可正常运行。'; }
+  }
   const outcome = await orchestrator.run(prompt, {
     tabId: selectedTabId.value,
     executionMode: executionMode.value,
@@ -290,19 +313,19 @@ const submit = async (prompt: string): Promise<void> => {
   });
   if (outcome.text) messages.value.push(outcome.text);
   else if (outcome.code) messages.value.push(`任务结束：${outcome.code}`);
-  const selected = tabs.value.find((tab) => tab.id === selectedTabId.value);
   try {
     if (historyEnabled.value && selected) {
-      const task = historyGuard.redact({ text: prompt, exitCode: null, truncated: false, durationMs: 0 }).redactedText;
       const result = historyGuard.redact({ text: outcome.text || outcome.code || '', exitCode: null, truncated: false, durationMs: 0 }).redactedText;
-      await services.workspaceHistory.append(workspace.value.handle, { id: crypto.randomUUID(), createdAt: Date.now(), provider: selected.provider, task, outcome: result, status: outcome.code ? 'failed' : 'completed' });
+      await services.workspaceHistory.append(workspace.value.handle, { id: crypto.randomUUID(), createdAt: Date.now(), provider: selected.provider, task: guardedTask, outcome: result, status: outcome.code ? 'failed' : 'completed' });
+      await services.workspaceHistory.saveRecovery(workspace.value.handle, { updatedAt: Date.now(), provider: selected.provider, task: guardedTask, phase: outcome.state, summary: result });
+      recovery.value = null;
       await refreshWorkHistory();
     }
   } catch { /* A task result remains usable when optional local history cannot be written. */ }
   busy.value = false;
 };
 onMounted(() => {
-  void refreshWorkspace().then(refreshWorkHistory).catch(() => { workHistory.value = []; });
+  void refreshWorkspace().then(async () => { await Promise.all([refreshWorkHistory(), refreshRecovery()]); }).catch(() => { workHistory.value = []; recovery.value = null; });
   void refreshTabs().catch(() => { tabs.value = []; selectedTabId.value = null; });
   void services.relaySettings.load().then((saved) => { if (saved) { savedRelayUrl.value = saved; relayUrl.value = saved; } }).catch(() => { relayError.value = 'WISP relay URL 读取失败'; });
   void services.agentSettings.load().then((saved) => { customInstructions.value = saved; }).catch(() => { customInstructionsError.value = '自定义 Agent 指令读取失败'; });
@@ -314,6 +337,7 @@ onMounted(() => {
     <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">聊天页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.provider }} 页面：{{ tab.title }}</option></select></label></div>
     <NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" />
     <AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" />
+    <section v-if="recovery?.phase === 'running'" aria-label="恢复上次任务"><p>上次任务在 {{ recovery.updatedAt }} 保存：{{ recovery.task }}</p><p>进度：{{ recovery.summary }}</p><p v-if="recoveryError">{{ recoveryError }}</p><button type="button" @click="resumeRecovery">恢复任务</button></section>
     <section aria-label="工作记录"><button v-if="!historyEnabled" type="button" @click="enableWorkHistory">启用工作记录（写入 .session）</button><button v-else type="button" @click="clearWorkHistory">清除工作记录</button><p v-if="historyError">{{ historyError }}</p><p v-if="workHistory.length === 0">暂无工作记录</p><p v-for="record in workHistory" :key="record.id">{{ record.provider }} · {{ record.status }} · {{ record.task }} · {{ record.outcome }}</p></section>
     <section v-if="showMemoryProfileWarning" role="dialog" aria-label="高内存冷启动确认"><p>切换到 512 MiB 会冷重启虚拟机，丢失活动命令、工作区挂载、事务和网络状态，并增加浏览器内存占用。</p><button @click="confirmHighMemoryProfile">确认切换到 512 MiB</button><button @click="cancelMemoryProfileChange">取消</button></section>
     <AutoModeStatus :workspace-name="workspace?.workspaceId ?? '未选择目录'" :relay-origin="relayOrigin" :auto="executionMode === 'auto'" :network="networkMode === 'wisp'" @stop="stopTask" />
