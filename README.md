@@ -82,8 +82,9 @@ npm run sbom
 
 ## VM boot state
 
-The repository ships only the verified kernel, firmware, initramfs, root image,
-and v86 runtime required for a cold boot. It never ships a prebuilt VM state.
+The repository ships only the verified kernel, firmware, initramfs, and v86
+runtime required for a cold boot. Its root image is embedded in the initramfs,
+not duplicated as a standalone package asset. It never ships a prebuilt VM state.
 After a user's first offline boot is ready (before any workspace is mounted),
 the extension may save a local browser snapshot for that same RAM profile.
 These local states are not part of the extension package or Git history. WISP

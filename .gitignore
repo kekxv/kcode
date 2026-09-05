@@ -13,6 +13,5 @@ public/v86/*
 !public/v86/vgabios.bin
 !public/v86/vmlinuz-virt
 !public/v86/kcode-initramfs
-!public/v86/kcode-rootfs.sqfs
 # Browser-local VM states are never package assets or source artifacts.
 public/v86/*state*

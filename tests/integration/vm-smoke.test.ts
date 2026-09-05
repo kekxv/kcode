@@ -243,26 +243,29 @@ describe('two-stage Alpine boot assets', () => {
     expect(await fs.readFile(join(root, 'scripts/build-alpine-guest.sh'), 'utf8')).toContain('mkdir -p "$staging/rootfs/work"');
   });
 
-  it('lists the embedded SquashFS root image in the manifest', async () => {
-    // Break caught: omitting the separately verified root image makes the loader's embedded payload unverifiable.
+  it('ships the root image only inside the initramfs', async () => {
+    // Break caught: copying the already embedded root image into public assets doubles the extension download without changing boot.
     const manifest = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
-    expect(manifest.assets).toHaveProperty('kcode-rootfs.sqfs');
+    expect(manifest.assets).not.toHaveProperty('kcode-rootfs.sqfs');
+    await expect(fs.access(join(root, 'public/v86/kcode-rootfs.sqfs'))).rejects.toThrow();
   });
 
-  it('rejects a standard-profile root image larger than the boot payload limit', async () => {
-    // Break caught: accepting a root image larger than v86's standard 256 MiB boot window makes cold boot fail before /init runs.
+  it('rejects an initramfs with an oversized embedded root image', async () => {
+    // Break caught: removing the loose rootfs must not remove the 60 MiB limit that makes standard-memory VM boots viable.
     const fixture = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-assets-'));
     try {
       const assets = join(fixture, 'assets');
       await fs.mkdir(assets);
-      for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs']) {
-        await fs.copyFile(join(root, 'public/v86', name), join(assets, name));
-      }
-      const rootfs = join(assets, 'kcode-rootfs.sqfs');
-      await fs.writeFile(rootfs, Buffer.alloc(1));
-      await fs.truncate(rootfs, standardRootfsLimit + 1);
       const source = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
-      const assetNames = ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs'];
+      const assetNames = Object.keys(source.assets);
+      await Promise.all(assetNames.filter((name) => name !== 'kcode-initramfs')
+        .map((name) => fs.copyFile(join(root, 'public/v86', name), join(assets, name))));
+      const payload = join(fixture, 'payload');
+      await fs.mkdir(payload);
+      const embeddedRootfs = join(payload, 'kcode-rootfs.sqfs');
+      await fs.writeFile(embeddedRootfs, Buffer.alloc(1));
+      await fs.truncate(embeddedRootfs, standardRootfsLimit + 1);
+      await execFile('bash', ['-c', 'cd -- "$1" && find . -print | cpio -o -H newc | xz -9e > "$2"', 'bash', payload, join(assets, 'kcode-initramfs')]);
       source.assets = Object.fromEntries(await Promise.all(assetNames.map(async (name) => [
         name,
         sha256(await fs.readFile(join(assets, name))),
@@ -272,7 +275,7 @@ describe('two-stage Alpine boot assets', () => {
       await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
         cwd: root,
         env: { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets },
-      })).rejects.toMatchObject({ stderr: expect.stringContaining('kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit') });
+      })).rejects.toMatchObject({ stderr: expect.stringContaining('embedded kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit') });
     } finally {
       await fs.rm(fixture, { recursive: true, force: true });
     }
@@ -302,31 +305,6 @@ describe('two-stage Alpine boot assets', () => {
       await fs.rm(fixture, { recursive: true, force: true });
     }
   });
-
-  it('rejects an initramfs whose embedded root image differs from the manifest-bound loose asset', async () => {
-    // Break caught: accepting a separately hashed root image that is not the bytes embedded in /kcode-initramfs defeats boot-time asset verification.
-    const fixture = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-assets-'));
-    try {
-      const assets = join(fixture, 'assets');
-      await fs.mkdir(assets);
-      const source = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
-      const assetNames = Object.keys(source.assets);
-      await Promise.all(assetNames.map((name) => fs.copyFile(join(root, 'public/v86', name), join(assets, name))));
-      await fs.writeFile(join(assets, 'kcode-rootfs.sqfs'), 'different root image');
-      source.assets = Object.fromEntries(await Promise.all(assetNames.map(async (name) => [
-        name,
-        sha256(await fs.readFile(join(assets, name))),
-      ])));
-      await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
-
-      await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
-        cwd: root,
-        env: { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets },
-      })).rejects.toMatchObject({ stderr: expect.stringContaining('embedded /kcode-rootfs.sqfs SHA-256 differs') });
-    } finally {
-      await fs.rm(fixture, { recursive: true, force: true });
-    }
-  }, 30_000);
 
   it('rejects a protected marker in a rootfs symlink target', async () => {
     // Break caught: scanning only file bytes permits a protected path to survive packaging through a symlink target.

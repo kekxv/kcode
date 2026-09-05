@@ -68,7 +68,6 @@ docker run --rm --platform linux/386 --mount "type=bind,src=$staging/rootfs,dst=
 test -s "$staging/output/kcode-rootfs.sqfs"
 if [[ $(stat -c '%s' "$staging/output/kcode-rootfs.sqfs") -gt $rootfs_limit ]]; then echo "kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit of $rootfs_limit bytes" >&2; exit 1; fi
 docker run --rm --platform linux/386 --mount "type=bind,src=$staging/output,dst=/input,readonly" --mount "type=bind,src=$root/scripts,dst=/scripts,readonly" "$image" sh -ec 'unsquashfs -no-progress -d /verified /input/kcode-rootfs.sqfs >/dev/null && node /scripts/scan-vm-image.mjs /verified'
-cp "$staging/output/kcode-rootfs.sqfs" "$root/public/v86/kcode-rootfs.sqfs"
 
 mkdir -p "$staging/loader/bin" "$staging/loader/lib" "$staging/loader/dev" "$staging/loader/proc" "$staging/loader/sys" "$staging/loader/newroot"
 cp -a "$staging/rootfs/bin/busybox" "$staging/loader/bin/busybox"
@@ -105,7 +104,7 @@ const [manifestPath, lockPath] = process.argv.slice(2);
 const hash = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 manifest.alpine.apkLockSha256 = await hash(lockPath);
-for (const name of ['vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs']) manifest.assets[name] = await hash(new URL(`./${name}`, `file://${manifestPath}`).pathname);
+for (const name of ['vmlinuz-virt', 'kcode-initramfs']) manifest.assets[name] = await hash(new URL(`./${name}`, `file://${manifestPath}`).pathname);
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
 
