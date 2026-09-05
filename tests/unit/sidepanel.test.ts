@@ -93,6 +93,19 @@ describe('Side Panel shell', () => {
     expect(task).toHaveProperty('value', 'write hello.txt');
   });
 
+  it('refreshes the chat connection after the chat page becomes available', async () => {
+    // Break caught: the side panel snapshots its connection state at mount and remains disconnected after a chat tab finishes loading.
+    const services = fakeServices(false);
+    (services.tab.listConnectedTabs as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 7, title: 'DeepSeek', provider: 'DeepSeek' }]);
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await screen.findByText('未连接聊天');
+    await fireEvent.click(screen.getByRole('button', { name: '刷新聊天连接' }));
+    await waitFor(() => expect(screen.getByText('聊天已连接')).toBeTruthy());
+    expect(services.tab.listConnectedTabs).toHaveBeenCalledTimes(2);
+  });
+
   it('shows trusted relay settings independently of network consent state', async () => {
     // Break caught: the only relay configuration path is hidden behind enabling authority, so it cannot be validated and saved first.
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
