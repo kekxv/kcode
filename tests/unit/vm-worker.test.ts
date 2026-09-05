@@ -137,6 +137,10 @@ describe('vm.worker lifecycle correlation', () => {
     worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
     expect(FakeRuntime.instances[0].sent).toHaveLength(1);
     expect(FakeRuntime.instances[0].sent[0]).toContain('cd /work && exec /bin/sh');
+    const nonce = FakeRuntime.instances[0].sent[0].match(/KCODE_BEGIN:([^\\]+)\\037/)?.[1];
+    FakeRuntime.instances[0].emit(`\x1eKCODE_BEGIN:${nonce}\x1f/work\x1eKCODE_END:${nonce}:0\x1f`);
+    await vi.waitFor(() => expect((globalThis.self as unknown as { postMessage: ReturnType<typeof vi.fn> }).postMessage)
+      .toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_RESULT', requestId: 'run' })));
   });
 
   it('dispatches confined file RPCs without converting path or content into shell commands', async () => {
