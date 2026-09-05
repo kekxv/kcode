@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { QwenAdapter } from '../../../src/content/adapters/qwen';
+import { qwenSelectors } from '../../../src/content/adapters/qwen';
 import { GoogleAiStudioAdapter } from '../../../src/content/adapters/google-ai-studio';
 import { ChatGptAdapter } from '../../../src/content/adapters/chatgpt';
 
@@ -10,6 +11,12 @@ const documentFor = (kind: 'qwen' | 'google' | 'chatgpt'): Document => {
 };
 
 describe('provider adapters', () => {
+  it('prefers Qwen’s observed composer and send controls over generic fallbacks', () => {
+    // Break caught: a Qwen page adds another textarea/button and a broad fallback targets the wrong control.
+    expect(qwenSelectors.composer[0]).toBe('textarea.message-input-textarea');
+    expect(qwenSelectors.send[0]).toBe('button.send-button[aria-label="Send"]');
+  });
+
   it.each([
     ['qwen', QwenAdapter], ['google', GoogleAiStudioAdapter], ['chatgpt', ChatGptAdapter],
   ] as const)('fills and sends an exact visible composer for %s', async (kind, Adapter) => {
