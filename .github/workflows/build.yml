@@ -29,7 +29,7 @@ jobs:
         id: verify
         run: |
           set +e
-          npm run verify 2>&1 | tee verify.log
+          NO_COLOR=1 FORCE_COLOR=0 npm run verify 2>&1 | tee verify.log
           verify_status=${PIPESTATUS[0]}
           echo "exit_code=$verify_status" >> "$GITHUB_OUTPUT"
           exit "$verify_status"
@@ -45,9 +45,9 @@ jobs:
             echo '## kcode CI/CD summary'
             echo
             if [ "$VERIFY_OUTCOME" = success ]; then
-              echo '> ✅ Verification, security scans, build, and end-to-end tests passed.'
+              echo '> PASS: verification, security scans, build, and end-to-end tests passed.'
             else
-              echo "> ❌ Verification failed with exit code \`$VERIFY_EXIT_CODE\`. The diagnostic excerpt below is taken from \`verify.log\`."
+              echo "> FAIL: verification exited with code $VERIFY_EXIT_CODE. A sanitized diagnostic excerpt follows."
             fi
             echo
             echo '| Stage | Result |'
@@ -59,19 +59,20 @@ jobs:
             if [ "$VERIFY_OUTCOME" != success ]; then
               echo '### Failure diagnosis'
               if [ -s verify.log ]; then
+                clean_log=$(mktemp)
+                sed -E $'s/\x1B\[[0-?]*[ -/]*[@-~]//g' verify.log > "$clean_log"
                 echo '```text'
-                matches=$(grep -Ei '(^ FAIL |AssertionError|Error:|VM asset verification failed|security .*failed|Test Files|Tests .*failed|[0-9]+ failed)' verify.log | tail -n 80 || true)
+                matches=$(grep -Ei '(^ FAIL |AssertionError|Error:|VM asset verification failed|security .*failed|Test Files|Tests .*failed|[0-9]+ failed)' "$clean_log" | tail -n 80 || true)
                 if [ -n "$matches" ]; then
                   printf '%s\n' "$matches"
                 else
-                  tail -n 80 verify.log
+                  tail -n 80 "$clean_log"
                 fi
+                rm -f "$clean_log"
                 echo '```'
               else
-                echo '_`verify.log` was not created; inspect the Verify step output._'
+                echo '_verify.log was not created; inspect the Verify step output._'
               fi
-              echo
-              echo 'The complete `verify.log` is attached as the **kcode-verify-log** artifact.'
               echo
             fi
             echo '### Build output'
@@ -84,13 +85,6 @@ jobs:
               echo '_No `dist/` directory was produced._'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload verification log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kcode-verify-log
-          path: verify.log
-          if-no-files-found: warn
       - name: Upload extension package
         if: success()
         uses: actions/upload-artifact@v4
