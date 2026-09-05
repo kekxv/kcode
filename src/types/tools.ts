@@ -5,7 +5,8 @@ import type { JournalSummary } from '../worker/p9/mutation-journal';
 export type BashToolCall = { id: string; tool: 'bash'; args: { cmd: string; workspace: WorkspaceCapability; timeoutMs?: number } };
 export type ReadFileToolCall = { id: string; tool: 'read_file'; args: { path: string; maxBytes?: number } };
 export type WriteFileToolCall = { id: string; tool: 'write_file'; args: { path: string; content: string } };
-export type ToolCall = BashToolCall | ReadFileToolCall | WriteFileToolCall;
+export type FetchToolCall = { id: string; tool: 'fetch'; args: { url: string; maxBytes?: number } };
+export type ToolCall = BashToolCall | ReadFileToolCall | WriteFileToolCall | FetchToolCall;
 
 export type AssistantTurn = { kind: 'final'; text: string } | { kind: 'tool'; call: ToolCall };
 export type ChangeDecision = 'accept' | 'rollback';
@@ -20,5 +21,5 @@ export type AgentState = 'idle' | 'awaiting-risk-consent' | 'waiting-ai' | 'awai
 
 export const authorizationForTool = (call: ToolCall, source: ToolAuthorization['source']): ToolAuthorization => ({
   source,
-  capabilities: Object.freeze([call.tool === 'read_file' ? 'read' : call.tool === 'write_file' ? 'write' : call.args.workspace]),
+  capabilities: Object.freeze([call.tool === 'read_file' || call.tool === 'fetch' ? 'read' : call.tool === 'write_file' ? 'write' : call.args.workspace]),
 });

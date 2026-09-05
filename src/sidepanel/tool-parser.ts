@@ -47,6 +47,14 @@ const parseCall = (value: unknown): ToolCall => {
     if (!exact(args, ['path', 'content']) || typeof args.content !== 'string' || encoder.encode(args.content).byteLength > MAX_FILE_BYTES) return invalid();
     return { id: value.id, tool: 'write_file', args: { path: path(args.path), content: args.content } };
   }
+  if (value.tool === 'fetch') {
+    const args = value.args;
+    if (!(exact(args, ['url']) || exact(args, ['url', 'maxBytes'])) || typeof args.url !== 'string' || ('maxBytes' in args && !integerIn(args.maxBytes, 1, MAX_FILE_BYTES))) return invalid();
+    let url: URL;
+    try { url = new URL(args.url); } catch { return invalid(); }
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash || encoder.encode(url.href).byteLength > 8 * 1024) return invalid();
+    return { id: value.id, tool: 'fetch', args: { url: url.href, ...('maxBytes' in args ? { maxBytes: args.maxBytes as number } : {}) } };
+  }
   return invalid();
 };
 

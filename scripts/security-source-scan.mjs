@@ -8,18 +8,18 @@ const fail = (message) => { throw new Error(`SECURITY_SOURCE_SCAN: ${message}`);
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 
 if (manifest.manifest_version !== 3) fail('manifest_version must be 3');
-if (JSON.stringify(manifest).match(/<all_urls>|"tabs"|"activeTab"/)) fail('broad manifest permission');
+if (JSON.stringify(manifest).match(/"tabs"|"activeTab"/)) fail('forbidden manifest permission');
 if ('optional_host_permissions' in manifest) fail('optional_host_permissions is forbidden');
 if (JSON.stringify(manifest.permissions) !== JSON.stringify(['sidePanel', 'storage'])) fail('permissions contract changed');
-const expectedHosts = [
+const expectedContentHosts = [
   'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*',
   'https://aistudio.google.com/*', 'https://chatgpt.com/*',
   'https://hix.ai/*',
 ];
-if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(expectedHosts)) fail('host permission contract changed');
+if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(['<all_urls>'])) fail('host permission contract changed');
 if (manifest.content_security_policy?.extension_pages !== expectedCsp) fail('extension CSP contract changed');
 if (!Array.isArray(manifest.content_scripts) || manifest.content_scripts.length !== 1
-  || JSON.stringify(manifest.content_scripts[0].matches) !== JSON.stringify(expectedHosts)) fail('content script scope changed');
+  || JSON.stringify(manifest.content_scripts[0].matches) !== JSON.stringify(expectedContentHosts)) fail('content script scope changed');
 
 const dangerous = [
   ['v-html', /v-html\b/], ['innerHTML', /\.innerHTML\b/], ['outerHTML', /\.outerHTML\b/],

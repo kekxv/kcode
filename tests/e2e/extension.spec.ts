@@ -46,7 +46,7 @@ test('packages content scripts only for the supported chat origins', async () =>
     'https://aistudio.google.com/*', 'https://chatgpt.com/*',
     'https://hix.ai/*',
   ];
-  expect(manifest.host_permissions).toEqual(expected);
+  expect(manifest.host_permissions).toEqual(['<all_urls>']);
   expect(manifest.content_scripts[0]?.matches).toEqual(expected);
 });
 

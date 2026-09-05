@@ -4,13 +4,7 @@
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage"],
-  "host_permissions": [
-    "https://chat.deepseek.com/*",
-    "https://chat.qwen.ai/*",
-    "https://aistudio.google.com/*",
-    "https://chatgpt.com/*",
-    "https://hix.ai/*"
-  ],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
