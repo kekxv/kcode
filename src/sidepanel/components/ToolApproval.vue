@@ -4,7 +4,7 @@ import { visualizeControls } from '../../security/untrusted-text';
 import { authorizationForTool, type ToolCall } from '../../types/tools';
 const props = defineProps<{ call: ToolCall; workspaceName: string; network: string }>();
 const emit = defineEmits<{ approveTool: []; reject: [] }>();
-const visibleOperation = computed(() => visualizeControls(props.call.tool === 'bash' ? props.call.args.cmd : props.call.args.path));
+const visibleOperation = computed(() => visualizeControls(props.call.tool === 'bash' ? props.call.args.cmd : props.call.tool === 'fetch' ? props.call.args.url : props.call.args.path));
 const capability = computed(() => authorizationForTool(props.call, 'interactive').capabilities[0]);
 </script>
 <template>

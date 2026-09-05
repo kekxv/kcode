@@ -86,8 +86,11 @@ export class ToolDispatcher {
         if (signal.aborted) return failure(abortCode(signal));
       }
 
-      if (call.tool === 'bash') {
-        const result = await this.vm.exec(`cd /work && ${call.args.cmd}`, { timeoutMs: call.args.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS });
+      if (call.tool === 'bash' || call.tool === 'fetch') {
+        const command = call.tool === 'bash'
+          ? `cd /work && ${call.args.cmd}`
+          : `curl --fail --location --max-time 120 --max-filesize ${call.args.maxBytes ?? 1_048_576} -- ${JSON.stringify(call.args.url)}`;
+        const result = await this.vm.exec(command, { timeoutMs: call.tool === 'bash' ? call.args.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS : DEFAULT_COMMAND_TIMEOUT_MS });
         if (result.transactionId !== transactionId) return failure('TOOL_TRANSACTION_MISMATCH');
         return {
           transactionId,
