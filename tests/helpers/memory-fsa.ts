@@ -26,7 +26,11 @@ class MemoryFile implements Pick<FileSystemFileHandle, 'kind' | 'name' | 'getFil
         if (command.type === 'truncate') { bytes = bytes.slice(0, Number(command.size)); return; }
         if (command.type === 'write') { position = Number(command.position ?? position); data = command.data!; }
       }
-      const incoming = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
+      const incoming = data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : ArrayBuffer.isView(data)
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : new TextEncoder().encode(String(data));
       const end = position + incoming.byteLength;
       if (end > bytes.byteLength) { const expanded = new Uint8Array(end); expanded.set(bytes); bytes = expanded; }
       bytes.set(incoming, position);

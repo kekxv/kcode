@@ -36,6 +36,18 @@ describe('ToolDispatcher', () => {
     expect(runtime.exec).not.toHaveBeenCalled();
   });
 
+  it('maps a fetch call to bounded curl after network consent is confirmed', async () => {
+    // Break caught: a fetch bypasses WISP consent, browser egress controls, or
+    // loses its response cap while becoming shell text.
+    const runtime = vm();
+    const networked = { ...workspace, network: { mode: 'wisp' as const, relayUrl: 'wss://relay.example/wisp' } };
+    const authorizeNetwork = vi.fn(async () => true);
+    const dispatcher = new ToolDispatcher(runtime, async () => networked, authorizeNetwork);
+    await dispatcher.execute({ id: 'fetch-1', tool: 'fetch', args: { url: 'https://example.com/data', maxBytes: 1024 } }, { source: 'interactive', capabilities: ['read'] }, new AbortController().signal);
+    expect(authorizeNetwork).toHaveBeenCalledWith({ workspaceId: 'workspace-1', relayUrl: 'wss://relay.example/wisp' });
+    expect(runtime.exec).toHaveBeenCalledWith('curl --fail --location --max-time 120 --max-filesize 1024 -- "https://example.com/data"', { timeoutMs: 120_000 });
+  });
+
   it('rejects broadened or mismatched authorization before starting a Worker', async () => {
     const runtime = vm();
     const dispatcher = new ToolDispatcher(runtime, async () => workspace);

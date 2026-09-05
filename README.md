@@ -39,7 +39,16 @@ WISP provides relay-policy-dependent guest outbound TCP for typical DNS/HTTPS/Gi
 
 The extension does not operate a public relay. Use a relay you control or that your team operates, and enter its public WebSocket URL such as `wss://relay.example.com/wisp`.
 
-For a small Docker deployment, run a WISP-protocol-compatible TCP-over-WebSocket relay on a VPS, NAS, or internal server and place it behind a TLS reverse proxy such as Caddy, Nginx, or Traefik. The relay must be reachable through `wss://`; plain `ws://` and ordinary HTTP/SOCKS proxy URLs are rejected. Restrict destinations and ports at the relay/firewall level, disable private and loopback destination access, and protect the endpoint with your normal access controls.
+For a small Docker deployment, this repository includes a restricted relay template in `deploy/wisp/`: it permits only outbound TCP to ports 80, 443, 9418, and 22; rejects direct-IP, private, and loopback targets; disables UDP; and caps concurrent streams. Point a public DNS name at the host, then run:
+
+```sh
+cd deploy/wisp
+cp .env.example .env
+# Set WISP_DOMAIN to the public DNS name in .env.
+docker compose up -d --build
+```
+
+Enter `wss://your-domain/` in the Side Panel. Caddy obtains and renews the TLS certificate, so inbound ports 80 and 443 must reach the host. The Docker image installs the third-party `@mercuryworkshop/wisp-js` relay at build time; it is not bundled into the extension. Review its upstream licensing before redistributing a built image.
 
 Cloudflare can provide the TLS/WebSocket edge for a relay endpoint. Whether it can also terminate the TCP relay depends on the Worker/Sockets features and egress policy available to your Cloudflare account. A compatible deployment still needs to expose a WISP WebSocket endpoint; an ordinary Cloudflare HTTP proxy URL is not sufficient.
 
@@ -49,7 +58,7 @@ The Agent may use a `fetch` tool call for HTTPS retrieval. It runs as a bounded 
 
 ### Local work history
 
-After workspace write permission is granted, completed tasks are recorded in `.session/kcode-history.sqlite` inside the selected directory. `.session/` is ignored by this repository's Git configuration. Use **清除工作记录** in the Side Panel to remove the SQLite history file.
+Use **启用工作记录（写入 .session）** to explicitly grant optional history writing. Completed tasks are then stored, after the same secret redaction and size bound used for tool results, in `.session/kcode-history.sqlite` inside the selected directory. Opening the Side Panel never creates this folder or database. `.session/` is ignored by this repository's Git configuration. Use **清除工作记录** to remove the SQLite history file.
 
 ## Checks
 

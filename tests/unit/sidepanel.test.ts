@@ -97,6 +97,33 @@ describe('Side Panel shell', () => {
     expect(screen.getByRole('button', { name: '清除指令' })).toBeTruthy();
   });
 
+  it('requires an explicit gesture before writing redacted work history', async () => {
+    // Break caught: completing an ordinary task requests write permission or
+    // stores a raw token without a separate, informed history opt-in.
+    const services = fakeServices(true);
+    services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('完成'); });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await screen.findByRole('button', { name: '开始任务' });
+    expect(screen.getByRole('button', { name: '启用工作记录（写入 .session）' })).toBeTruthy();
+
+    await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '处理 ghp_12345678901234567890');
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+    await waitFor(() => expect(services.tab.sendPrompt).toHaveBeenCalledOnce());
+    expect(services.workspace.requestReadWrite).not.toHaveBeenCalled();
+    expect(services.workspaceHistory.append).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole('button', { name: '启用工作记录（写入 .session）' }));
+    await waitFor(() => expect(services.workspace.requestReadWrite).toHaveBeenCalledOnce());
+    expect(screen.getByRole('button', { name: '清除工作记录' })).toBeTruthy();
+
+    await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '处理 ghp_12345678901234567890');
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+    await waitFor(() => expect(services.workspaceHistory.append).toHaveBeenCalledOnce());
+    const record = (services.workspaceHistory.append as ReturnType<typeof vi.fn>).mock.calls[0][1] as { task: string };
+    expect(record.task).toContain('[REDACTED:github-token]');
+    expect(record.task).not.toContain('ghp_12345678901234567890');
+  });
+
   it('saves supplemental instructions and attaches them to the next task only after fixed safety policy', async () => {
     // Break caught: the visible editor persists text but the orchestrator never receives it, or injects it before immutable controls.
     const services = fakeServices(true);

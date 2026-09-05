@@ -1,0 +1,13 @@
+{
+  "port_whitelist": [80, 443, 9418, 22],
+  "allow_udp_streams": false,
+  "allow_tcp_streams": true,
+  "allow_direct_ip": false,
+  "allow_private_ips": false,
+  "allow_loopback_ips": false,
+  "stream_limit_per_host": 8,
+  "stream_limit_total": 32,
+  "dns_method": "resolve",
+  "dns_ttl": 120,
+  "wisp_version": 2
+}

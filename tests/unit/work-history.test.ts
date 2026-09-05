@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WorkHistoryStore } from '../../src/sidepanel/work-history';
+import { WorkspaceHistoryStore } from '../../src/sidepanel/workspace-history';
+import { MemoryFsaRoot } from '../helpers/memory-fsa';
 
 const storageArea = () => {
   const values: Record<string, unknown> = {};
@@ -29,5 +31,25 @@ describe('WorkHistoryStore', () => {
       await store.append({ id: `run-${index}`, createdAt: index, provider: 'HIX.AI', task: 'task', outcome: 'event', status: 'completed' });
     }
     await expect(store.load()).resolves.toHaveLength(101);
+  });
+
+  it('stores and clears SQLite history only inside the selected .session directory', async () => {
+    // Break caught: durable history is written outside the selected workspace or clear leaves the database behind.
+    const root = new MemoryFsaRoot(); const store = new WorkspaceHistoryStore();
+    const record = { id: 'sqlite-1', createdAt: 1, provider: 'HIX.AI' as const, task: 'task', outcome: 'done', status: 'completed' as const };
+    await store.append(root as unknown as FileSystemDirectoryHandle, record);
+    await expect(store.load(root as unknown as FileSystemDirectoryHandle)).resolves.toEqual([record]);
+    const session = await root.getDirectoryHandle('.session');
+    await expect(session.getFileHandle('kcode-history.sqlite')).resolves.toBeTruthy();
+    await store.clear(root as unknown as FileSystemDirectoryHandle);
+    await expect(session.getFileHandle('kcode-history.sqlite')).rejects.toMatchObject({ name: 'NotFoundError' });
+  });
+
+  it('does not create a .session directory when history has not been explicitly enabled', async () => {
+    // Break caught: merely opening the side panel mutates the selected
+    // workspace and prompts for write access before the user opts in.
+    const root = new MemoryFsaRoot(); const store = new WorkspaceHistoryStore();
+    await expect(store.load(root as unknown as FileSystemDirectoryHandle)).resolves.toEqual([]);
+    await expect(root.getDirectoryHandle('.session')).rejects.toMatchObject({ name: 'NotFoundError' });
   });
 });

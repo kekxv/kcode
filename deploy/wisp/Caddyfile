@@ -1,0 +1,3 @@
+{$WISP_DOMAIN} {
+  reverse_proxy wisp:5001
+}

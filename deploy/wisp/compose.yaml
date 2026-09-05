@@ -1,0 +1,25 @@
+services:
+  wisp:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./options.json:/etc/kcode-wisp/options.json:ro
+    expose:
+      - "5001"
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WISP_DOMAIN: ${WISP_DOMAIN:?set_a_public_domain}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - wisp
+volumes:
+  caddy_data:
+  caddy_config:

@@ -14,6 +14,13 @@ describe('parseAssistantTurn', () => {
     expect(parseAssistantTurn(tool({ id: 'write-1', tool: 'write_file', args: { path: 'notes.txt', content: 'ok' } }))).toMatchObject({ kind: 'tool', call: { tool: 'write_file' } });
   });
 
+  it('accepts a bounded credential-free HTTPS fetch call', () => {
+    // Break caught: the model can only request a read-capability HTTPS URL,
+    // never supply headers, credentials, or an unbounded response size.
+    expect(parseAssistantTurn(tool({ id: 'fetch-1', tool: 'fetch', args: { url: 'https://example.com/data', maxBytes: 1024 } })))
+      .toEqual({ kind: 'tool', call: { id: 'fetch-1', tool: 'fetch', args: { url: 'https://example.com/data', maxBytes: 1024 } } });
+  });
+
   it('treats text without a tool tag as the final answer', () => {
     expect(parseAssistantTurn('任务已完成。')).toEqual({ kind: 'final', text: '任务已完成。' });
   });
@@ -21,7 +28,12 @@ describe('parseAssistantTurn', () => {
   it.each([
     ['extra envelope key', { id: 'x', tool: 'bash', args: { cmd: 'pwd', workspace: 'read' }, extra: true }],
     ['extra args key', { id: 'x', tool: 'bash', args: { cmd: 'pwd', workspace: 'read', nope: true } }],
-    ['unknown tool', { id: 'x', tool: 'fetch', args: {} }],
+    ['fetch missing URL', { id: 'x', tool: 'fetch', args: {} }],
+    ['non-HTTPS fetch', { id: 'x', tool: 'fetch', args: { url: 'http://example.com' } }],
+    ['fetch credentials', { id: 'x', tool: 'fetch', args: { url: 'https://user:password@example.com' } }],
+    ['fetch fragment', { id: 'x', tool: 'fetch', args: { url: 'https://example.com/#secret' } }],
+    ['oversized fetch URL', { id: 'x', tool: 'fetch', args: { url: `https://example.com/${'a'.repeat(8 * 1024)}` } }],
+    ['oversized fetch result', { id: 'x', tool: 'fetch', args: { url: 'https://example.com', maxBytes: 1_048_577 } }],
     ['invalid id', { id: '../x', tool: 'bash', args: { cmd: 'pwd', workspace: 'read' } }],
     ['empty command', { id: 'x', tool: 'bash', args: { cmd: ' ', workspace: 'read' } }],
     ['oversized maxBytes', { id: 'x', tool: 'read_file', args: { path: 'a.txt', maxBytes: 1_048_577 } }],
