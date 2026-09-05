@@ -27,6 +27,7 @@ test('loads the packaged extension and renders the safe initial side panel', asy
     await expect(page.getByRole('region', { name: '运行状态' })).toContainText('网络：offline');
     await expect(page.getByRole('button', { name: '选择工作目录' })).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'VM 内存' })).toHaveValue('standard');
+    await expect(page.getByRole('textbox', { name: '自定义 Agent 指令' })).toBeVisible();
     await expect(page.getByRole('region', { name: '安全终端' })).toBeVisible();
     await expect(page.getByRole('button', { name: '开始任务' })).toBeDisabled();
   } finally {

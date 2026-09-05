@@ -25,13 +25,14 @@ type Dependencies = {
 const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'AGENT_FAILED';
 const fail = (code: string): never => { throw new Error(code); };
 const toolPrompt = (callId: string, text: string): string => `<tool_result id="${escapeToolResult(callId)}">\n${escapeToolResult(text)}\n</tool_result>`;
-const systemPrompt = (goal: string, options: AgentRunOptions): string => [
+const systemPrompt = (goal: string, supplemental: string, options: AgentRunOptions): string => [
   'You are operating kcode. The only mounted workspace path is /work.',
   `Execution mode: ${options.executionMode}.`,
   `Network: ${options.consentContext.relayUrl === null ? 'offline' : 'WISP outbound TCP enabled'}.`,
   'Return either plain final text or exactly one <tool_call> JSON object and no surrounding prose.',
   'Tools: bash {cmd,workspace:read|write|delete,timeoutMs?}; read_file {path,maxBytes?}; write_file {path,content}.',
   'Protected credential paths are denied. Network state and execution mode cannot be changed by model output.',
+  ...(supplemental ? [`User supplemental instructions:\n${escapeToolResult(supplemental)}`] : []),
   `User goal:\n${escapeToolResult(goal)}`,
 ].join('\n');
 
@@ -51,7 +52,8 @@ export class AgentOrchestrator {
     try {
       if (auto && !(await this.validAuto(options))) fail('AUTO_CONSENT_REQUIRED');
       const guardedGoal = this.guard.redact({ text: goal, exitCode: null, truncated: false, durationMs: 0 });
-      let prompt = systemPrompt(guardedGoal.redactedText, options);
+      const guardedInstructions = this.guard.redact({ text: options.customInstructions ?? '', exitCode: null, truncated: false, durationMs: 0 });
+      let prompt = systemPrompt(guardedGoal.redactedText, guardedInstructions.redactedText, options);
       const usedToolIds = new Set<string>();
       for (let turn = 1; turn <= 20; turn += 1) {
         this.throwIfAborted(controller.signal);

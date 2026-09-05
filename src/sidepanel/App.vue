@@ -6,12 +6,14 @@ import type { MemoryProfile } from '../types/protocol';
 import type { TabClient } from './tab-client';
 import type { VMClient } from './vm-client';
 import type { RelaySettingsStore } from './relay-settings';
+import type { AgentSettingsStore } from './agent-settings';
 export type SidePanelServices = {
   workspace: Pick<WorkspaceStore, 'load' | 'selectDirectory' | 'getPermission' | 'requestReadWrite'>;
   tab: Pick<TabClient, 'listConnectedTabs' | 'sendPrompt'>;
   vm: Pick<VMClient, 'terminate' | 'selectMemoryProfile' | 'attachWorkspace' | 'start' | 'exec' | 'readFile' | 'writeFile' | 'beginTransaction' | 'commitTransaction' | 'rollbackTransaction' | 'subscribe'>;
   consent: { grant(modes: readonly ('auto' | 'workspace-networked')[], context: ConsentContext): Promise<void>; hasValid(mode: 'auto' | 'workspace-networked', context: ConsentContext): Promise<boolean>; revokeAll(): Promise<void> };
   relaySettings: Pick<RelaySettingsStore, 'load' | 'save' | 'clear'>;
+  agentSettings: Pick<AgentSettingsStore, 'load' | 'save' | 'clear'>;
 };
 export const sidePanelServicesKey: InjectionKey<SidePanelServices> = Symbol('sidePanelServices');
 </script>
@@ -29,6 +31,7 @@ import TaskComposer from './components/TaskComposer.vue';
 import TerminalPane from './components/TerminalPane.vue';
 import ToolApproval from './components/ToolApproval.vue';
 import NetworkSettings from './components/NetworkSettings.vue';
+import AgentSettings from './components/AgentSettings.vue';
 import { AgentOrchestrator } from './agent-orchestrator';
 import { ToolDispatcher } from './tool-dispatcher';
 const services = inject(sidePanelServicesKey);
@@ -43,6 +46,7 @@ const pendingMemoryProfile = ref<MemoryProfile | null>(null);
 const showMemoryProfileWarning = ref(false);
 const networkMode = ref<'offline' | 'wisp'>('offline');
 const relayUrl = ref(''); const savedRelayUrl = ref<string | null>(null); const relayError = ref<string | null>(null); const activeRelayUrl = ref<string | null>(null); const autoRequested = ref(false); const networkRequested = ref(false); const showConsent = ref(false);
+const customInstructions = ref(''); const customInstructionsError = ref<string | null>(null);
 const messages = ref<string[]>([]); const terminalChunks = ref<string[]>([]); const busy = ref(false);
 const agentState = ref('idle');
 type ToolDecision = { call: ToolCall; finish: (authorization: ToolAuthorization | null) => void };
@@ -162,6 +166,14 @@ const clearRelayUrl = async (): Promise<void> => {
     savedRelayUrl.value = null;
   } catch { relayError.value = 'WISP relay URL 清除失败'; }
 };
+const saveCustomInstructions = async (): Promise<void> => {
+  customInstructionsError.value = null;
+  try { customInstructions.value = await services.agentSettings.save(customInstructions.value); } catch { customInstructionsError.value = '自定义 Agent 指令保存失败或超过 16 KiB'; }
+};
+const clearCustomInstructions = async (): Promise<void> => {
+  customInstructionsError.value = null;
+  try { await services.agentSettings.clear(); customInstructions.value = ''; } catch { customInstructionsError.value = '自定义 Agent 指令清除失败'; }
+};
 const acceptConsent = async (): Promise<void> => {
   const selected = workspace.value; if (!selected) return rejectConsent();
   const generation = authorityGeneration;
@@ -252,6 +264,7 @@ const submit = async (prompt: string): Promise<void> => {
     tabId: selectedTabId.value,
     executionMode: executionMode.value,
     consentContext: { workspaceId: workspace.value.workspaceId, relayUrl: networkMode.value === 'wisp' ? activeRelayUrl.value : null },
+    customInstructions: customInstructions.value,
   });
   if (outcome.text) messages.value.push(outcome.text);
   else if (outcome.code) messages.value.push(`任务结束：${outcome.code}`);
@@ -261,6 +274,7 @@ onMounted(() => {
   void refreshWorkspace().catch(() => { permission.value = 'unavailable'; });
   void refreshTabs().catch(() => { tabs.value = []; selectedTabId.value = null; });
   void services.relaySettings.load().then((saved) => { if (saved) { savedRelayUrl.value = saved; relayUrl.value = saved; } }).catch(() => { relayError.value = 'WISP relay URL 读取失败'; });
+  void services.agentSettings.load().then((saved) => { customInstructions.value = saved; }).catch(() => { customInstructionsError.value = '自定义 Agent 指令读取失败'; });
 });
 </script>
 <template>
@@ -268,6 +282,7 @@ onMounted(() => {
     <StatusBar :directory="directoryStatus" :vm="vmStatus" :webpage="webpageStatus" :execution="executionMode" :network="networkMode" :capability="currentCapability" :journal="journalStatus" :release="releaseStatus" />
     <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">DeepSeek 页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.title }}</option></select></label></div>
     <NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" />
+    <AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" />
     <section v-if="showMemoryProfileWarning" role="dialog" aria-label="高内存冷启动确认"><p>切换到 512 MiB 会冷重启虚拟机，丢失活动命令、工作区挂载、事务和网络状态，并增加浏览器内存占用。</p><button @click="confirmHighMemoryProfile">确认切换到 512 MiB</button><button @click="cancelMemoryProfileChange">取消</button></section>
     <AutoModeStatus :workspace-name="workspace?.workspaceId ?? '未选择目录'" :relay-origin="relayOrigin" :auto="executionMode === 'auto'" :network="networkMode === 'wisp'" @stop="stopTask" />
     <RiskConsentDialog v-if="showConsent" :auto="autoRequested" :network="networkRequested" @accept="acceptConsent" @cancel="rejectConsent" />

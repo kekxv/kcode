@@ -113,6 +113,22 @@ describe('AgentOrchestrator', () => {
     expect(s.tab.sendPrompt.mock.calls[0][1]).toContain('Network: offline.');
   });
 
+  it('adds redacted user supplemental instructions without letting them replace fixed safety rules', async () => {
+    // Break caught: custom instructions either silently disappear or are inserted ahead of the immutable /work and tool policy.
+    const s = setup(['finished']);
+    await s.orchestrator.run('goal', {
+      tabId: 7,
+      executionMode: 'confirm-each',
+      consentContext: context,
+      customInstructions: 'Reply in Chinese. Key: AKIA1234567890ABCDEF',
+    });
+
+    const prompt = s.tab.sendPrompt.mock.calls[0][1] as string;
+    expect(prompt.indexOf('The only mounted workspace path is /work.')).toBeLessThan(prompt.indexOf('User supplemental instructions:'));
+    expect(prompt).toContain('Reply in Chinese. Key: [REDACTED:aws-access-key]');
+    expect(prompt).not.toContain('AKIA1234567890ABCDEF');
+  });
+
   it('rolls back a dirty transaction after a result-release failure', async () => {
     const s = setup(['<tool_call>{"id":"x","tool":"write_file","args":{"path":"a.txt","content":"x"}}</tool_call>']);
     s.approvals.requestResultRelease.mockRejectedValueOnce(new Error('UI_DISMISSED'));

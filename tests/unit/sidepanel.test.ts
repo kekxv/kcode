@@ -25,6 +25,7 @@ const fakeServices = (ready = false): SidePanelServices => {
     },
     consent: { grant: vi.fn(), hasValid: vi.fn().mockResolvedValue(false), revokeAll: vi.fn() },
     relaySettings: { load: vi.fn().mockResolvedValue(null), save: vi.fn(async (value: string) => value), clear: vi.fn() },
+    agentSettings: { load: vi.fn().mockResolvedValue(''), save: vi.fn(async (value: string) => value), clear: vi.fn() },
   };
 };
 
@@ -84,6 +85,34 @@ describe('Side Panel shell', () => {
     expect(await screen.findByRole('textbox', { name: 'WISP relay URL' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '保存中继' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '清除中继' })).toBeTruthy();
+  });
+
+  it('shows a local supplemental instruction editor before a task begins', async () => {
+    // Break caught: users cannot inspect or change the text that will accompany every task in the selected chat.
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
+
+    expect(await screen.findByRole('textbox', { name: '自定义 Agent 指令' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '保存指令' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '清除指令' })).toBeTruthy();
+  });
+
+  it('saves supplemental instructions and attaches them to the next task only after fixed safety policy', async () => {
+    // Break caught: the visible editor persists text but the orchestrator never receives it, or injects it before immutable controls.
+    const services = fakeServices(true);
+    services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('完成'); });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    const custom = await screen.findByRole('textbox', { name: '自定义 Agent 指令' });
+
+    await fireEvent.update(custom, '始终用中文总结。');
+    await fireEvent.click(screen.getByRole('button', { name: '保存指令' }));
+    await waitFor(() => expect(services.agentSettings.save).toHaveBeenCalledWith('始终用中文总结。'));
+    await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '列出目录');
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+
+    await waitFor(() => expect(services.tab.sendPrompt).toHaveBeenCalledOnce());
+    const prompt = (services.tab.sendPrompt as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(prompt.indexOf('The only mounted workspace path is /work.')).toBeLessThan(prompt.indexOf('User supplemental instructions:'));
+    expect(prompt).toContain('始终用中文总结。');
   });
 
   it('terminates execution and revokes session consent before persisting a changed relay', async () => {

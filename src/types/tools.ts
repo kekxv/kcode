@@ -14,7 +14,7 @@ export type GuardedResult = { redactedText: string; findings: readonly GuardFind
 export type LocalToolResult = { text: string; exitCode: number | null; truncated: boolean; durationMs: number };
 export type ToolExecution = { transactionId: string; result: LocalToolResult; journalSummary: JournalSummary };
 export type ToolAuthorization = { source: 'interactive' | 'auto-consent'; capabilities: readonly WorkspaceCapability[] };
-export type AgentRunOptions = { tabId: number; executionMode: ExecutionMode; consentContext: ConsentContext };
+export type AgentRunOptions = { tabId: number; executionMode: ExecutionMode; consentContext: ConsentContext; customInstructions?: string };
 export type AgentOutcome = { state: 'completed' | 'failed' | 'cancelled'; code?: string; text?: string };
 export type AgentState = 'idle' | 'awaiting-risk-consent' | 'waiting-ai' | 'awaiting-tool-approval' | 'running-tool' | 'reviewing-changes' | 'awaiting-result-release' | 'completed' | 'failed' | 'cancelled';
 
