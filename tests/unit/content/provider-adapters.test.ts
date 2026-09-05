@@ -15,6 +15,32 @@ describe('provider adapters', () => {
     // Break caught: a Qwen page adds another textarea/button and a broad fallback targets the wrong control.
     expect(qwenSelectors.composer[0]).toBe('textarea.message-input-textarea');
     expect(qwenSelectors.send[0]).toBe('button.send-button[aria-label="Send"]');
+    expect(qwenSelectors.composerRegion[0]).toBe('.message-input-container');
+  });
+
+  it('finds Qwen’s send button after the composer input makes it available', async () => {
+    // Break caught: Qwen initially shows a voice control and replaces it with Send only after input.
+    document.body.innerHTML = '<main><div class="message-input-container"><textarea class="message-input-textarea"></textarea></div><section data-qwen-messages></section></main>';
+    const region = document.querySelector('.message-input-container') as HTMLElement;
+    const composer = document.querySelector('textarea') as HTMLTextAreaElement;
+    const messages = document.querySelector('section') as HTMLElement;
+    for (const element of [region, composer, messages]) {
+      Object.defineProperty(element, 'getClientRects', { value: () => [{ width: 1 }] });
+    }
+    let clicked = false;
+    composer.addEventListener('input', () => {
+      const send = document.createElement('button');
+      send.className = 'send-button';
+      send.setAttribute('aria-label', 'Send');
+      send.addEventListener('click', () => { clicked = true; });
+      Object.defineProperty(send, 'getClientRects', { value: () => [{ width: 1 }] });
+      region.append(send);
+    }, { once: true });
+
+    await new QwenAdapter(document).sendPrompt('hello', new AbortController().signal);
+
+    expect(composer.value).toBe('hello');
+    expect(clicked).toBe(true);
   });
 
   it.each([

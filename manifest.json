@@ -31,7 +31,7 @@
       "https://aistudio.google.com/*",
       "https://chatgpt.com/*"
     ],
-      "js": ["src/content/index.ts"],
+      "js": ["src/content/content-script.ts"],
       "run_at": "document_idle",
       "all_frames": false,
       "match_about_blank": false

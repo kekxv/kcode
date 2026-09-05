@@ -177,8 +177,7 @@ export class DeepSeekAdapter implements SiteAdapter {
     if (signal.aborted) throw aborted();
     const region = selectPreferred(this.document, this.selectors.composerRegion, isVisible);
     const composer = selectOne(region, this.selectors.composer, (element) => isVisible(element) && isEnabled(element));
-    const send = selectOne(region, this.selectors.send, (element) => isVisible(element) && isEnabled(element));
-    if (!(composer instanceof HTMLElement) || !(send instanceof HTMLElement)) throw domChanged();
+    if (!(composer instanceof HTMLElement)) throw domChanged();
     const assistantList = selectPreferred(this.document, this.selectors.assistantList, isVisible);
     const chatScope = commonAncestor(region, assistantList);
     const assistantCandidates = new Set<Element>();
@@ -197,6 +196,8 @@ export class DeepSeekAdapter implements SiteAdapter {
     }
     dispatchComposerEvents(composer, prompt);
     if (signal.aborted) throw aborted();
+    const send = selectOne(region, this.selectors.send, (element) => isVisible(element) && isEnabled(element));
+    if (!(send instanceof HTMLElement)) throw domChanged();
     const anchor: ResponseAnchor = { existingAssistantNodes, startedAt: Date.now() };
     const preWatchCandidates = new Set<Element>();
     const preWatchObserver = new MutationObserver((records) => {

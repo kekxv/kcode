@@ -13,6 +13,7 @@ describe('manifest', () => {
       'https://chatgpt.com/*',
     ]);
     expect(manifest.content_scripts[0].matches).toEqual(manifest.host_permissions);
+    expect(manifest.content_scripts[0].js).toEqual(['src/content/content-script.ts']);
     expect(manifest).not.toHaveProperty('optional_host_permissions');
     expect(JSON.stringify(manifest)).not.toMatch(/<all_urls>|activeTab|"tabs"/);
     expect(manifest.content_security_policy.extension_pages).toBe(

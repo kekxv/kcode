@@ -48,3 +48,13 @@ test('packages content scripts only for the supported chat origins', async () =>
   expect(manifest.host_permissions).toEqual(expected);
   expect(manifest.content_scripts[0]?.matches).toEqual(expected);
 });
+
+test('packages the background router in the service worker entry', async () => {
+  // Break caught: content and background entries sharing `index.ts` make the generated service-worker loader import the content script.
+  const loader = await readFile(join(extensionPath, 'service-worker-loader.js'), 'utf8');
+  const asset = loader.match(/\.\/assets\/([^']+)/)?.[1];
+  expect(asset).toBeTruthy();
+  const worker = await readFile(join(extensionPath, 'assets', asset!), 'utf8');
+  expect(worker).toContain('setPanelBehavior');
+  expect(worker).toContain('onConnect.addListener');
+});
