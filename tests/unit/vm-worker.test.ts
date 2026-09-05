@@ -205,6 +205,13 @@ describe('vm.worker lifecycle correlation', () => {
     for (const requestId of ['begin', 'commit', 'rollback']) {
       expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId, code: 'VM_EXEC_ACTIVE' }));
     }
+
+    // Complete the disposable command before test teardown. Otherwise its
+    // heartbeat can outlive the mocked Dedicated Worker and emit into a
+    // restored Node global in slower CI environments.
+    const nonce = FakeRuntime.instances[0].sent[0].match(/KCODE_BEGIN:([^\\]+)\\037/)?.[1];
+    FakeRuntime.instances[0].emit(`\x1eKCODE_BEGIN:${nonce}\x1f\x1eKCODE_END:${nonce}:0\x1f`);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_RESULT', requestId: 'run' })));
   });
 
   it('permits journal finalization but never a second command after disposal destroys v86', async () => {
