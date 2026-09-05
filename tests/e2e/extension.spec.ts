@@ -23,13 +23,17 @@ test('loads the packaged extension and renders the safe initial side panel', asy
     const page = await context.newPage();
     await page.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
 
-    await expect(page.getByRole('region', { name: '运行状态' })).toContainText('执行：confirm-each');
-    await expect(page.getByRole('region', { name: '运行状态' })).toContainText('网络：offline');
+    await expect(page.getByText('确认每步', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '选择工作目录' })).toBeVisible();
-    await expect(page.getByRole('combobox', { name: 'VM 内存' })).toHaveValue('standard');
-    await expect(page.getByRole('textbox', { name: '自定义 Agent 指令' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '今天想完成什么？' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: '任务' })).toBeVisible();
     await expect(page.getByRole('region', { name: '安全终端' })).toBeVisible();
     await expect(page.getByRole('button', { name: '开始任务' })).toBeDisabled();
+    await page.getByRole('button', { name: '会话设置' }).click();
+    await expect(page.getByRole('dialog', { name: '会话设置' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: '主题' })).toHaveValue('system');
+    await expect(page.getByRole('combobox', { name: 'VM 内存' })).toHaveValue('standard');
+    await expect(page.getByRole('textbox', { name: '自定义 Agent 指令' })).toBeVisible();
   } finally {
     await context?.close();
     await rm(profile, { recursive: true, force: true });

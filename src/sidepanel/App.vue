@@ -9,6 +9,7 @@ import type { RelaySettingsStore } from './relay-settings';
 import type { AgentSettingsStore } from './agent-settings';
 import type { RecoveryCheckpoint, WorkspaceHistoryStore } from './workspace-history';
 import type { WorkRecord } from './work-history';
+import type { ThemeMode } from './theme-settings';
 export type SidePanelServices = {
   workspace: Pick<WorkspaceStore, 'load' | 'selectDirectory' | 'getPermission' | 'requestReadWrite'>;
   tab: Pick<TabClient, 'listConnectedTabs' | 'sendPrompt'>;
@@ -17,6 +18,7 @@ export type SidePanelServices = {
   relaySettings: Pick<RelaySettingsStore, 'load' | 'save' | 'clear'>;
   agentSettings: Pick<AgentSettingsStore, 'load' | 'save' | 'clear'>;
   workspaceHistory: Pick<WorkspaceHistoryStore, 'load' | 'append' | 'clear' | 'loadRecovery' | 'saveRecovery' | 'clearRecovery'>;
+  themeSettings?: { load(): Promise<ThemeMode>; save(mode: ThemeMode): Promise<ThemeMode> };
 };
 export const sidePanelServicesKey: InjectionKey<SidePanelServices> = Symbol('sidePanelServices');
 </script>
@@ -29,7 +31,6 @@ import ChatFeed from './components/ChatFeed.vue';
 import ChangeReview from './components/ChangeReview.vue';
 import RiskConsentDialog from './components/RiskConsentDialog.vue';
 import ResultRelease from './components/ResultRelease.vue';
-import StatusBar from './components/StatusBar.vue';
 import TaskComposer from './components/TaskComposer.vue';
 import TerminalPane from './components/TerminalPane.vue';
 import ToolApproval from './components/ToolApproval.vue';
@@ -57,6 +58,10 @@ const historyEnabled = ref(false); const historyError = ref<string | null>(null)
 const recovery = ref<RecoveryCheckpoint | null>(null); const recoveryError = ref<string | null>(null);
 const historyGuard = new DefaultResultGuard();
 const agentState = ref('idle');
+const themeMode = ref<ThemeMode>('system');
+const systemDark = ref(false);
+const effectiveTheme = computed(() => themeMode.value === 'system' ? (systemDark.value ? 'dark' : 'light') : themeMode.value);
+const settingsOpen = ref(false);
 type ToolDecision = { call: ToolCall; finish: (authorization: ToolAuthorization | null) => void };
 type ChangeReviewDecision = { execution: ToolExecution; finish: (decision: ChangeDecision | null) => void };
 type ReleaseDecision = { result: GuardedResult; finish: (approved: boolean) => void };
@@ -329,23 +334,25 @@ onMounted(() => {
   void refreshTabs().catch(() => { tabs.value = []; selectedTabId.value = null; });
   void services.relaySettings.load().then((saved) => { if (saved) { savedRelayUrl.value = saved; relayUrl.value = saved; } }).catch(() => { relayError.value = 'WISP relay URL 读取失败'; });
   void services.agentSettings.load().then((saved) => { customInstructions.value = saved; }).catch(() => { customInstructionsError.value = '自定义 Agent 指令读取失败'; });
+  void services.themeSettings?.load().then((saved) => { themeMode.value = saved; }).catch(() => {});
+  const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+  if (media) { systemDark.value = media.matches; media.addEventListener?.('change', (event) => { systemDark.value = event.matches; }); }
 });
+const setTheme = async (mode: ThemeMode): Promise<void> => { themeMode.value = await services.themeSettings?.save(mode) ?? mode; };
 </script>
 <template>
-  <main class="side-panel">
-    <StatusBar :directory="directoryStatus" :vm="vmStatus" :webpage="webpageStatus" :execution="executionMode" :network="networkMode" :capability="currentCapability" :journal="journalStatus" :release="releaseStatus" />
-    <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">聊天页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.provider }} 页面：{{ tab.title }}</option></select></label></div>
-    <NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" />
-    <AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" />
+  <main class="side-panel" :data-theme="effectiveTheme">
+    <header class="app-header"><span class="brand-mark">⌘</span><strong>kcode</strong><button class="more-button" aria-label="会话设置" @click="settingsOpen = true">•••</button></header>
+    <div class="context-pills"><span><i :class="tabs.length ? 'online' : ''"></i>{{ tabs.length ? '聊天已连接' : '未连接聊天' }}</span><button @click="chooseDirectory">{{ workspace ? '/work · 项目' : '选择工作目录' }}</button><span>{{ executionMode === 'auto' ? 'Auto' : '确认每步' }}</span></div>
+    <dialog :open="settingsOpen" aria-label="会话设置"><header><strong>会话设置</strong><button aria-label="关闭设置" @click="settingsOpen = false">×</button></header><p>风险能力始终需要明确确认。</p><label>主题<select :value="themeMode" @change="setTheme(($event.target as HTMLSelectElement).value as ThemeMode)"><option value="system">跟随浏览器</option><option value="light">亮色</option><option value="dark">暗色</option></select></label><div class="workspace-controls"><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">聊天页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.provider }}：{{ tab.title }}</option></select></label></div><NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" /><AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" /><section aria-label="工作记录"><button v-if="!historyEnabled" type="button" @click="enableWorkHistory">启用工作记录（写入 .session）</button><button v-else type="button" @click="clearWorkHistory">清除工作记录</button><p v-if="historyError" role="alert">{{ historyError }}</p><p v-if="workHistory.length === 0">暂无工作记录</p><p v-for="record in workHistory" :key="record.id">{{ record.provider }} · {{ record.status }} · {{ record.task }} · {{ record.outcome }}</p></section></dialog>
     <section v-if="recovery?.phase === 'running'" aria-label="恢复上次任务"><p>上次任务在 {{ recovery.updatedAt }} 保存：{{ recovery.task }}</p><p>进度：{{ recovery.summary }}</p><p v-if="recoveryError">{{ recoveryError }}</p><button type="button" @click="resumeRecovery">恢复任务</button></section>
-    <section aria-label="工作记录"><button v-if="!historyEnabled" type="button" @click="enableWorkHistory">启用工作记录（写入 .session）</button><button v-else type="button" @click="clearWorkHistory">清除工作记录</button><p v-if="historyError">{{ historyError }}</p><p v-if="workHistory.length === 0">暂无工作记录</p><p v-for="record in workHistory" :key="record.id">{{ record.provider }} · {{ record.status }} · {{ record.task }} · {{ record.outcome }}</p></section>
     <section v-if="showMemoryProfileWarning" role="dialog" aria-label="高内存冷启动确认"><p>切换到 512 MiB 会冷重启虚拟机，丢失活动命令、工作区挂载、事务和网络状态，并增加浏览器内存占用。</p><button @click="confirmHighMemoryProfile">确认切换到 512 MiB</button><button @click="cancelMemoryProfileChange">取消</button></section>
     <AutoModeStatus :workspace-name="workspace?.workspaceId ?? '未选择目录'" :relay-origin="relayOrigin" :auto="executionMode === 'auto'" :network="networkMode === 'wisp'" @stop="stopTask" />
     <RiskConsentDialog v-if="showConsent" :auto="autoRequested" :network="networkRequested" @accept="acceptConsent" @cancel="rejectConsent" />
     <ToolApproval v-if="pendingTool" :call="pendingTool.call" :workspace-name="workspace?.workspaceId ?? '未选择目录'" :network="networkMode === 'wisp' ? relayOrigin : 'offline'" @approve-tool="approveTool" @reject="rejectTool" />
     <ChangeReview v-if="pendingChanges" :summary="pendingChanges.execution.journalSummary" @accept="decideChanges('accept')" @rollback="decideChanges('rollback')" />
     <ResultRelease v-if="pendingRelease" :result="pendingRelease.result" @release="decideRelease(true)" @cancel="decideRelease(false)" />
-    <section class="panel-content"><ChatFeed :messages="messages" /><TerminalPane :chunks="terminalChunks" /></section>
+    <section class="panel-content"><section v-if="messages.length === 0" class="welcome"><h1>今天想完成什么？</h1><p>我会在需要时请求工具权限。</p><div><button @click="submit('了解 /work 中的项目结构')">了解项目结构</button><button @click="submit('实现一个功能并验证')">实现一个功能</button></div></section><ChatFeed :messages="messages" /><TerminalPane :chunks="terminalChunks" /></section>
     <TaskComposer :disabled="!canSubmit" @submit="submit" @cancel="stopTask" />
   </main>
 </template>

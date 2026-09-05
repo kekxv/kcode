@@ -32,6 +32,11 @@ const fakeServices = (ready = false): SidePanelServices => {
 
 afterEach(() => cleanup());
 
+const openSettings = async (): Promise<void> => {
+  await fireEvent.click(screen.getByRole('button', { name: '会话设置' }));
+  await screen.findByRole('dialog', { name: '会话设置' });
+};
+
 describe('Side Panel shell', () => {
   it('lists only tabs reported by the authenticated background Port', async () => {
     // Break caught: the panel calls chrome.tabs.query or accepts a mismatched listing response.
@@ -82,7 +87,7 @@ describe('Side Panel shell', () => {
   it('shows trusted relay settings independently of network consent state', async () => {
     // Break caught: the only relay configuration path is hidden behind enabling authority, so it cannot be validated and saved first.
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
-
+    await openSettings();
     expect(await screen.findByRole('textbox', { name: 'WISP relay URL' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '保存中继' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '清除中继' })).toBeTruthy();
@@ -91,7 +96,7 @@ describe('Side Panel shell', () => {
   it('shows a local supplemental instruction editor before a task begins', async () => {
     // Break caught: users cannot inspect or change the text that will accompany every task in the selected chat.
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
-
+    await openSettings();
     expect(await screen.findByRole('textbox', { name: '自定义 Agent 指令' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '保存指令' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '清除指令' })).toBeTruthy();
@@ -104,6 +109,7 @@ describe('Side Panel shell', () => {
     services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('完成'); });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     expect(screen.getByRole('button', { name: '启用工作记录（写入 .session）' })).toBeTruthy();
 
     await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '处理 ghp_12345678901234567890');
@@ -132,6 +138,7 @@ describe('Side Panel shell', () => {
     recovery.loadRecovery = vi.fn().mockResolvedValue({ updatedAt: 1, provider: 'DeepSeek', task: '继续整理需求', phase: 'running', summary: '已完成目录检查' });
     services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('恢复完成'); });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await openSettings();
 
     expect((await screen.findByRole('region', { name: '恢复上次任务' })).textContent).toContain('继续整理需求');
     expect(services.tab.sendPrompt).not.toHaveBeenCalled();
@@ -147,6 +154,7 @@ describe('Side Panel shell', () => {
     services.workspaceHistory.loadRecovery = vi.fn().mockResolvedValue({ updatedAt: 1, provider: 'DeepSeek', task: 'interrupted', phase: 'running', summary: 'checkpoint' });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('region', { name: '恢复上次任务' });
+    await openSettings();
     await fireEvent.click(screen.getByRole('button', { name: '启用工作记录（写入 .session）' }));
     await fireEvent.click(screen.getByRole('button', { name: '清除工作记录' }));
     await waitFor(() => expect(screen.queryByRole('region', { name: '恢复上次任务' })).toBeNull());
@@ -157,6 +165,7 @@ describe('Side Panel shell', () => {
     const services = fakeServices(true);
     services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.('完成'); });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await openSettings();
     const custom = await screen.findByRole('textbox', { name: '自定义 Agent 指令' });
 
     await fireEvent.update(custom, '始终用中文总结。');
@@ -175,6 +184,7 @@ describe('Side Panel shell', () => {
     // Break caught: a new relay becomes durable while an old VM/consent generation can still use the previous endpoint.
     const services = fakeServices(true);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await openSettings();
     const relay = await screen.findByRole('textbox', { name: 'WISP relay URL' });
 
     await fireEvent.update(relay, 'wss://relay.example:443/new');
@@ -224,11 +234,12 @@ describe('Side Panel shell', () => {
     services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.(answers.shift() ?? ''); handlers?.onDone?.(); });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     await fireEvent.click(screen.getByRole('checkbox', { name: '启用 Auto' }));
     await screen.findByRole('dialog', { name: '高风险能力确认' });
     for (const box of screen.getAllByRole('checkbox', { name: /AI 可以|仓库|工具结果|操作可能/ })) await fireEvent.click(box);
     await fireEvent.click(screen.getByRole('button', { name: '启用 Auto' }));
-    await screen.findByText('执行：auto');
+    await screen.findByText('Auto');
     await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '自动更新');
     await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
 
@@ -244,6 +255,7 @@ describe('Side Panel shell', () => {
     // Break caught: a passive select-model change silently doubles browser memory and discards the current VM state without an explicit user acknowledgement.
     const services = fakeServices(true);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await openSettings();
     const memory = await screen.findByRole('combobox', { name: 'VM 内存' });
     expect((memory as HTMLSelectElement).value).toBe('standard');
     await fireEvent.update(memory, 'high');
@@ -260,6 +272,7 @@ describe('Side Panel shell', () => {
     const services = fakeServices(true);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
 
     const relay = await screen.findByRole('textbox', { name: 'WISP relay URL' });
     await fireEvent.update(relay, 'wss://relay.example/wisp');
@@ -283,8 +296,8 @@ describe('Side Panel shell', () => {
     await fireEvent.update(memory, 'high');
     await fireEvent.click(screen.getByRole('button', { name: '确认切换到 512 MiB' }));
 
-    expect(await screen.findByText('执行：confirm-each')).toBeTruthy();
-    expect(await screen.findByText('网络：offline')).toBeTruthy();
+    expect(await screen.findByText('确认每步')).toBeTruthy();
+    expect((screen.getByRole('checkbox', { name: '连接工作区网络' }) as HTMLInputElement).checked).toBe(false);
     expect(services.vm.terminate).toHaveBeenCalledWith('VM_MEMORY_PROFILE_CHANGED');
     expect(services.vm.selectMemoryProfile).toHaveBeenCalledWith('high');
     expect(services.consent.revokeAll).toHaveBeenCalledTimes(4);
@@ -297,6 +310,7 @@ describe('Side Panel shell', () => {
     services.consent.grant = vi.fn(() => new Promise<void>((resolve) => { resolveGrant = resolve; }));
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     await fireEvent.click(screen.getByRole('checkbox', { name: '启用 Auto' }));
     await screen.findByRole('dialog', { name: '高风险能力确认' });
     for (const box of screen.getAllByRole('checkbox', { name: /AI 可以|仓库|工具结果|操作可能/ })) await fireEvent.click(box);
@@ -309,8 +323,8 @@ describe('Side Panel shell', () => {
     resolveGrant();
 
     await waitFor(() => expect(services.vm.selectMemoryProfile).toHaveBeenCalledWith('high'));
-    expect(screen.getByText('执行：confirm-each')).toBeTruthy();
-    expect(screen.queryByText('执行：auto')).toBeNull();
+    expect(screen.getByText('确认每步')).toBeTruthy();
+    expect(screen.queryByText('Auto')).toBeNull();
   });
 
   it('does not reopen an older high-risk dialog after a memory-profile reset', async () => {
@@ -322,6 +336,7 @@ describe('Side Panel shell', () => {
       .mockResolvedValue(undefined);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     await fireEvent.click(screen.getByRole('checkbox', { name: '启用 Auto' }));
 
     const memory = screen.getByRole('combobox', { name: 'VM 内存' });
@@ -340,6 +355,7 @@ describe('Side Panel shell', () => {
     const services = fakeServices(true);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     await fireEvent.click(screen.getByRole('checkbox', { name: '启用 Auto' }));
     const enable = await screen.findByRole('button', { name: '启用 Auto' });
     expect(enable).toHaveProperty('disabled', true);
@@ -355,6 +371,7 @@ describe('Side Panel shell', () => {
     const services = fakeServices(true);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     await screen.findByRole('button', { name: '开始任务' });
+    await openSettings();
     const relay = await screen.findByRole('textbox', { name: 'WISP relay URL' });
     await fireEvent.update(relay, 'wss://relay.example/first');
     await fireEvent.click(screen.getByRole('button', { name: '保存中继' }));
@@ -363,10 +380,10 @@ describe('Side Panel shell', () => {
     await screen.findByRole('dialog', { name: '高风险能力确认' });
     for (const box of screen.getAllByRole('checkbox', { name: /启用网络后|WISP 中继/ })) await fireEvent.click(box);
     await fireEvent.click(screen.getByRole('button', { name: '启用 Auto' }));
-    await screen.findByText('网络：wisp');
+    await screen.findByRole('alert');
     await fireEvent.update(relay, 'wss://relay.example/second');
 
-    await screen.findByText('网络：offline');
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect(services.vm.terminate).toHaveBeenCalledWith('RELAY_URL_CHANGED');
     expect(services.consent.revokeAll).toHaveBeenCalledTimes(3);
   });
