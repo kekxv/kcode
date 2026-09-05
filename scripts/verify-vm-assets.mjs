@@ -19,6 +19,9 @@ const toolchainImage = 'kcode-alpine-i386:locked';
 const permittedMetadata = new Set(['README.md', 'asset-manifest.json']);
 const errors = [];
 const execFile = promisify(execFileCallback);
+const containerUser = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+  ? `${process.getuid()}:${process.getgid()}`
+  : undefined;
 
 const fail = (message) => errors.push(message);
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -41,6 +44,7 @@ const embeddedRootfsSha256 = async (initramfsPath) => {
     await ensureToolchain();
     await execFile('docker', [
       'run', '--rm', '--platform', 'linux/386',
+      ...(containerUser ? ['--user', containerUser] : []),
       '--mount', `type=bind,src=${staging},dst=/input,readonly`,
       '--mount', `type=bind,src=${extraction},dst=/output`,
       toolchainImage,
