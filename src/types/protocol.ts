@@ -65,7 +65,7 @@ export type SidePanelAbortCommand = {
 };
 
 export type SidePanelCommand = SidePanelPromptCommand | SidePanelListTabsCommand | SidePanelAbortCommand;
-export type ChatProvider = 'DeepSeek' | 'Qwen' | 'Google AI Studio' | 'ChatGPT' | 'HIX.AI';
+export type ChatProvider = 'DeepSeek' | 'Qwen' | 'Google AI Studio' | 'ChatGPT' | 'HIX.AI' | 'Gemini';
 export type SidePanelEvent = {
   protocolVersion: 1;
   kind: 'SIDE_PANEL_CONNECTED_TABS';

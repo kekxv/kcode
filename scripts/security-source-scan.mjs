@@ -14,7 +14,7 @@ if (JSON.stringify(manifest.permissions) !== JSON.stringify(['sidePanel', 'stora
 const expectedContentHosts = [
   'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*',
   'https://aistudio.google.com/*', 'https://chatgpt.com/*',
-  'https://hix.ai/*',
+  'https://hix.ai/*', 'https://gemini.google.com/*',
 ];
 if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(['<all_urls>'])) fail('host permission contract changed');
 if (manifest.content_security_policy?.extension_pages !== expectedCsp) fail('extension CSP contract changed');

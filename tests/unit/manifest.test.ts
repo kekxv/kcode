@@ -9,6 +9,7 @@ describe('manifest', () => {
     expect(manifest.host_permissions).toEqual(['<all_urls>']);
     expect(manifest.content_scripts[0].matches).toEqual([
       'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*', 'https://aistudio.google.com/*', 'https://chatgpt.com/*', 'https://hix.ai/*',
+      'https://gemini.google.com/*',
     ]);
     expect(manifest.content_scripts[0].js).toEqual(['src/content/content-script.ts']);
     expect(manifest).not.toHaveProperty('optional_host_permissions');

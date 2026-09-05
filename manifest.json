@@ -25,7 +25,8 @@
       "https://chat.qwen.ai/*",
       "https://aistudio.google.com/*",
       "https://chatgpt.com/*",
-      "https://hix.ai/*"
+      "https://hix.ai/*",
+      "https://gemini.google.com/*"
     ],
       "js": ["src/content/content-script.ts"],
       "run_at": "document_idle",

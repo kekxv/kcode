@@ -18,6 +18,7 @@ export const SUPPORTED_CHAT_ORIGINS = new Set([
   'https://aistudio.google.com',
   'https://chatgpt.com',
   'https://hix.ai',
+  'https://gemini.google.com',
 ]);
 
 const safeOrigin = (url: string | undefined): string | null => {
@@ -35,6 +36,7 @@ const providerForUrl = (url: string | undefined): ChatProvider | null => {
     case 'https://aistudio.google.com': return 'Google AI Studio';
     case 'https://chatgpt.com': return 'ChatGPT';
     case 'https://hix.ai': return 'HIX.AI';
+    case 'https://gemini.google.com': return 'Gemini';
     default: return null;
   }
 };

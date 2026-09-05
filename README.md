@@ -24,6 +24,7 @@ Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, the
 - `https://aistudio.google.com/`
 - `https://chatgpt.com/`
 - `https://hix.ai/ai-chat`
+- `https://gemini.google.com/`
 
 The extension requests broad host access so its approved network tools can work across sites, but content scripts still run only on the listed chat sites. The extension does not set or modify a provider-native system prompt. Its optional custom Agent instructions are appended to the first kcode-controlled ordinary user message, after the fixed safety policy, so they cannot weaken workspace, approval, or network controls. Provider UI changes or ambiguous page controls stop the request with an adapter error instead of choosing a control heuristically.
 

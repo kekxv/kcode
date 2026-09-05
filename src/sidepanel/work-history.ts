@@ -8,7 +8,7 @@ const encoder = new TextEncoder();
 
 type LocalStorageArea = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void>; remove(key: string): Promise<void> };
 export type WorkRecord = { id: string; createdAt: number; provider: ChatProvider; task: string; outcome: string; status: 'completed' | 'failed' };
-const providers: readonly ChatProvider[] = ['DeepSeek', 'Qwen', 'Google AI Studio', 'ChatGPT', 'HIX.AI'];
+const providers: readonly ChatProvider[] = ['DeepSeek', 'Qwen', 'Google AI Studio', 'ChatGPT', 'HIX.AI', 'Gemini'];
 const valid = (value: unknown): value is WorkRecord => typeof value === 'object' && value !== null && Object.keys(value).length === 6
   && typeof (value as WorkRecord).id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test((value as WorkRecord).id)
   && Number.isSafeInteger((value as WorkRecord).createdAt) && (value as WorkRecord).createdAt >= 0

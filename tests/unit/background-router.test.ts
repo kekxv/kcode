@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PortRouter } from '../../src/background/port-router';
+import { PortRouter, SUPPORTED_CHAT_ORIGINS } from '../../src/background/port-router';
 
 type Listener<T> = { addListener: (listener: T) => void };
 
@@ -12,6 +12,12 @@ const makePort = (name: string, tabId?: number, url?: string) => ({
 });
 
 describe('PortRouter', () => {
+  it('accepts only the explicit expanded chat origins', () => {
+    expect(SUPPORTED_CHAT_ORIGINS).toEqual(new Set([
+      'https://chat.deepseek.com', 'https://chat.qwen.ai', 'https://aistudio.google.com',
+      'https://chatgpt.com', 'https://hix.ai', 'https://gemini.google.com',
+    ]));
+  });
   it('labels connected tabs from the trusted content-port origin', async () => {
     // Break caught: the side panel displays a provider name supplied by untrusted page DOM rather than browser-owned sender URL.
     const sidePanel = makePort('kcode-sidepanel');
