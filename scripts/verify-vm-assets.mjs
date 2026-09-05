@@ -17,6 +17,7 @@ const standardRootfsLimit = 60 * 1024 * 1024;
 const initramfsWireLimit = 64 * 1024 * 1024;
 const toolchainImage = 'kcode-alpine-i386:locked';
 const permittedMetadata = new Set(['README.md', 'asset-manifest.json']);
+const deepVerification = process.argv.includes('--deep') || process.env.KCODE_VM_DEEP_VERIFY === '1';
 const errors = [];
 const execFile = promisify(execFileCallback);
 const containerUser = typeof process.getuid === 'function' && typeof process.getgid === 'function'
@@ -126,7 +127,7 @@ if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v8
       if (name === 'kcode-initramfs') initramfsCanBeInspected = false;
     }
   }
-  if (initramfsCanBeInspected) {
+  if (deepVerification && initramfsCanBeInspected) {
     try {
       await inspectEmbeddedRootfs(join(assetsDirectory, 'kcode-initramfs'));
     } catch (error) {

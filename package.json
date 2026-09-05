@@ -15,6 +15,8 @@
     "test:e2e": "playwright test",
     "assets:sync": "node scripts/sync-v86-assets.mjs",
     "assets:verify": "node scripts/verify-vm-assets.mjs",
+    "assets:verify:deep": "node scripts/verify-vm-assets.mjs --deep",
+    "assets:rebuild": "npm run assets:sync && ./scripts/build-alpine-guest.sh && npm run assets:verify:deep",
     "security:source": "node scripts/security-source-scan.mjs",
     "security:dist": "node scripts/security-source-scan.mjs dist/manifest.json",
     "security:deps": "npm audit --audit-level=high",

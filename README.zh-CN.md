@@ -26,8 +26,25 @@ kcode 是一个 Chrome MV3 Side Panel 扩展：它让已登录的聊天网页在
 
 ```sh
 npm ci
-npm run verify
+npm run build
 ```
+
+此路径直接使用仓库中已提交、已锁定摘要的 `public/v86/` 资源，不需要 Docker。需要单独检查这些资源时可运行：
+
+```sh
+npm run assets:verify
+```
+
+### 重新生成 VM 资源（仅维护者）
+
+只有在有意更新客体系统或固定 v86 资源时才选择此路径。它需要 Docker，或提供兼容 `docker` 命令的 Podman 环境，并会重新生成仓库中的内核/initramfs：
+
+```sh
+npm ci
+npm run assets:rebuild
+```
+
+`assets:rebuild` 会执行 Docker 客体构建和深入的 initramfs/rootfs 检查。CI 也会执行同样的深入检查；普通 `npm run build` 与 `npm run verify` 只检查分发资源的清单、摘要和尺寸限制。
 
 在 Chrome 打开 `chrome://extensions`，启用开发者模式，选择“加载已解压的扩展程序”，并选择 `dist/` 目录。登录任一支持站点后，从扩展操作菜单打开 kcode Side Panel。
 
@@ -62,10 +79,10 @@ Agent 可以请求 HTTPS `fetch` 工具调用。它会在一次性 VM 内以有�
 
 扩展不会分发 VM 启动快照。首次离线启动就绪、且尚未挂载工作区时，扩展会在用户自己的浏览器中保存对应内存规格的本地快照；后续相同规格的离线启动可以复用。联网启动和不同内存规格始终冷启动，因此不会将旧 VM 中的设备、网络或工作区状态带入新的授权会话。本地快照不会进入扩展包、Git 或中继服务。
 
-资源改动后必须执行：
+资源改动后必须使用 Docker 路径执行：
 
 ```sh
-npm run assets:verify
+npm run assets:rebuild
 ```
 
 ## 限制

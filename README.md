@@ -15,9 +15,27 @@ kcode is a Chrome MV3 side-panel extension that lets a logged-in chat page reque
 
 ```sh
 npm ci
-npm run assets:verify
 npm run build
 ```
+
+This uses the checked-in, hash-verified VM assets in `public/v86/`; Docker is
+not required. To verify those files explicitly, run `npm run assets:verify`.
+
+### Regenerate VM assets (maintainers only)
+
+Use this path only when intentionally changing the guest image or pinned v86
+assets. It requires Docker or a Podman setup that provides a compatible
+`docker` CLI, and replaces the checked-in kernel/initramfs assets:
+
+```sh
+npm ci
+npm run assets:rebuild
+```
+
+`assets:rebuild` performs Docker-based guest construction followed by deep
+initramfs/rootfs inspection. CI runs the same deep inspection; ordinary builds
+and `npm run verify` only validate the shipped asset manifest, hashes and size
+limits.
 
 Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, then select `dist/`. Open and log in to one supported page, then open the kcode side panel from the extension action:
 

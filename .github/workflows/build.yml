@@ -29,7 +29,7 @@ jobs:
         id: verify
         run: |
           set +e
-          NO_COLOR=1 FORCE_COLOR=0 npm run verify 2>&1 | tee verify.log
+          NO_COLOR=1 FORCE_COLOR=0 sh -c 'npm run verify && npm run assets:verify:deep' 2>&1 | tee verify.log
           verify_status=${PIPESTATUS[0]}
           echo "exit_code=$verify_status" >> "$GITHUB_OUTPUT"
           exit "$verify_status"

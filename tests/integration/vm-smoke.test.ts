@@ -250,8 +250,10 @@ describe('two-stage Alpine boot assets', () => {
     await expect(fs.access(join(root, 'public/v86/kcode-rootfs.sqfs'))).rejects.toThrow();
   });
 
-  it('rejects an initramfs with an oversized embedded root image', async () => {
-    // Break caught: removing the loose rootfs must not remove the 60 MiB limit that makes standard-memory VM boots viable.
+  it('uses checked-in assets without container inspection unless deep verification is selected', async () => {
+    // Break caught: normal users should be able to build from the checked-in,
+    // hash-verified asset set without Docker; maintainers still need an
+    // explicit deep inspection path for the embedded rootfs limit.
     const fixture = await fs.mkdtemp(join(tmpdir(), 'kcode-vm-assets-'));
     try {
       const assets = join(fixture, 'assets');
@@ -272,9 +274,14 @@ describe('two-stage Alpine boot assets', () => {
       ])));
       await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
 
+      const env = { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets };
       await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
         cwd: root,
-        env: { ...process.env, KCODE_VM_ASSETS_DIRECTORY: assets },
+        env,
+      })).resolves.toBeDefined();
+      await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
+        cwd: root,
+        env: { ...env, KCODE_VM_DEEP_VERIFY: '1' },
       })).rejects.toMatchObject({ stderr: expect.stringContaining('embedded kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit') });
     } finally {
       await fs.rm(fixture, { recursive: true, force: true });
