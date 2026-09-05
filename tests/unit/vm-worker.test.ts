@@ -64,24 +64,25 @@ afterEach(() => {
 });
 
 describe('vm.worker lifecycle correlation', () => {
-  it('cold-boots workspace sessions so a pre-workspace snapshot cannot retain device state', async () => {
-    // Break caught: restoring the no-workspace snapshot before an attach can preserve stale 9P topology and run the mount before a live shell.
+  it('cold-boots workspace sessions without any reusable snapshot state', async () => {
+    // Break caught: restoring a prior machine state before an attach can
+    // preserve stale 9P topology and run the mount before a live shell.
     vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
     vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
-    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false, memoryProfile: 'standard', network: { mode: 'offline' } });
+    expect(FakeRuntime.instances[0].bootConfig).toEqual({ memoryProfile: 'standard', network: { mode: 'offline' } });
   });
 
   it('passes the accepted high-memory profile only to a fresh cold boot', async () => {
-    // Break caught: the worker can accidentally normalize high back to standard or request a reusable snapshot before Task 3 binds one to 512 MiB.
+    // Break caught: the worker can accidentally normalize high back to standard or request reusable machine state.
     vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
     vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session, memoryProfile: 'high' } } as MessageEvent);
-    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false, memoryProfile: 'high', network: { mode: 'offline' } });
+    expect(FakeRuntime.instances[0].bootConfig).toEqual({ memoryProfile: 'high', network: { mode: 'offline' } });
   });
 
   it('fails closed and retires a Dedicated Worker that receives a second VM_INIT', async () => {

@@ -2,6 +2,8 @@
 
 kcode is a Chrome MV3 side-panel extension that lets a logged-in chat page request bounded tools in a disposable v86 Alpine VM. It supports DeepSeek, Qwen, Google AI Studio, ChatGPT, and HIX.AI. The selected directory is mounted only at `/work` through 9P; every VM is destroyed after one tool call.
 
+[中文说明](README.zh-CN.md)
+
 ## Prerequisites
 
 - Node.js 22.12 or newer
@@ -77,6 +79,15 @@ npm run sbom
 ```
 
 `npm run verify` runs the release sequence including Playwright. The live WISP test is opt-in and needs `KCODE_WISP_TEST_URL` plus `KCODE_WISP_PROBE_URL` for an operator-controlled relay/probe.
+
+## VM boot state
+
+The repository ships only the verified kernel, firmware, initramfs, root image,
+and v86 runtime required for a cold boot. It never ships a prebuilt VM state.
+After a user's first offline boot is ready (before any workspace is mounted),
+the extension may save a local browser snapshot for that same RAM profile.
+These local states are not part of the extension package or Git history. WISP
+networked boots always cold-boot, as do boots with another memory profile.
 
 ## Limits
 

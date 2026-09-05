@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { build as viteBuild } from 'vite';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { V86Runtime, VM_MEMORY_BYTES } from '../../src/worker/v86-runtime';
 
 type Listener = (byte: number) => void;
@@ -23,6 +23,7 @@ class FakeV86 {
   readonly listeners = new Map<string, Listener>();
   readonly sent: string[] = [];
   destroyed = false;
+  savedStates = 0;
 
   constructor(readonly config: Record<string, unknown>) {
     FakeV86.latest = this;
@@ -38,6 +39,11 @@ class FakeV86 {
 
   destroy(): void {
     this.destroyed = true;
+  }
+
+  async save_state(): Promise<ArrayBuffer> {
+    this.savedStates += 1;
+    return new Uint8Array([1, 2, 3]).buffer;
   }
 
   emit(event: string): void {
@@ -59,6 +65,54 @@ const guestReadyMarker = (): string => {
 };
 
 describe('V86Runtime', () => {
+  it('creates an offline user snapshot after the first ready boot and restores it only for the same memory profile', async () => {
+    // Break caught: shipping a snapshot bloats the extension, while treating a
+    // 256 MiB state as a 512 MiB state can corrupt the restored VM.
+    const snapshots = {
+      load: vi.fn(async () => null as ArrayBuffer | null),
+      save: vi.fn(async () => undefined),
+    };
+    const first = new V86Runtime({
+      V86: FakeV86 as unknown as typeof import('v86').V86,
+      assetUrl: (name) => `chrome-extension://test/v86/${name}`,
+      snapshots,
+    });
+    const firstBoot = first.boot();
+    await vi.waitFor(() => expect(FakeV86.latest).toBeDefined());
+    const firstEmulator = FakeV86.latest;
+    FakeV86.latest?.emit('emulator-loaded');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
+    await firstBoot;
+    expect(snapshots.save).toHaveBeenCalledWith('standard', expect.any(ArrayBuffer));
+
+    const localState = new Uint8Array([9, 8, 7]).buffer;
+    snapshots.load.mockResolvedValueOnce(localState);
+    const second = new V86Runtime({
+      V86: FakeV86 as unknown as typeof import('v86').V86,
+      assetUrl: (name) => `chrome-extension://test/v86/${name}`,
+      snapshots,
+    });
+    const secondBoot = second.boot({ memoryProfile: 'standard' });
+    await vi.waitFor(() => expect(FakeV86.latest).not.toBe(firstEmulator));
+    const secondEmulator = FakeV86.latest;
+    expect(FakeV86.latest?.config.initial_state).toEqual({ buffer: localState });
+    FakeV86.latest?.emit('emulator-loaded');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
+    await secondBoot;
+
+    const high = new V86Runtime({
+      V86: FakeV86 as unknown as typeof import('v86').V86,
+      assetUrl: (name) => `chrome-extension://test/v86/${name}`,
+      snapshots,
+    });
+    const highBoot = high.boot({ memoryProfile: 'high' });
+    await vi.waitFor(() => expect(FakeV86.latest).not.toBe(secondEmulator));
+    expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
+    FakeV86.latest?.emit('emulator-loaded');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
+    await highBoot;
+  });
+
   it('cold-boots high memory at 512 MiB without restoring a standard snapshot', async () => {
     // Break caught: restoring the 256 MiB snapshot under a 512 MiB emulator crosses RAM geometry and can corrupt guest state.
     const runtime = new V86Runtime({
@@ -77,7 +131,7 @@ describe('V86Runtime', () => {
   it('installs a 9P handler and mounts the selected directory exclusively at /work', async () => {
     // Break caught: mounting at guest root, home, or /workspace lets shell dispatch escape the selected workspace contract.
     const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
-    const boot = runtime.boot({ useSnapshot: false });
+    const boot = runtime.boot();
     FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`); await boot;
     const root = { kind: 'directory', resolve: async (handle: unknown) => handle === root ? [] : null } as unknown as FileSystemDirectoryHandle;
     let attached = false;
@@ -100,7 +154,7 @@ describe('V86Runtime', () => {
     });
 
     let settled = false;
-    const boot = runtime.boot({ useSnapshot: false }).then(() => { settled = true; });
+    const boot = runtime.boot().then(() => { settled = true; });
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
     expect(settled).toBe(false);
     FakeV86.latest?.emit('emulator-loaded');
@@ -133,15 +187,16 @@ describe('V86Runtime', () => {
   it('maps a validated WISP URL to a virtio NIC while retaining the same 9P device', async () => {
     // Break caught: networking that replaces 9P, uses ws:, or restores an offline snapshot cannot provide the consented /work + TCP combination.
     const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
-    const boot = runtime.boot({ useSnapshot: false, network: { mode: 'wisp', relayUrl: 'wss://relay.example/wisp' } });
+    const boot = runtime.boot({ network: { mode: 'wisp', relayUrl: 'wss://relay.example/wisp' } });
     FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`); await boot;
     expect(FakeV86.latest?.config.net_device).toEqual({ type: 'virtio', relay_url: 'wisps://relay.example/wisp' });
     expect(FakeV86.latest?.config.filesystem).toMatchObject({ handle9p: expect.any(Function) });
     expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
   });
 
-  it('uses the verified snapshot by default and forwards serial text', async () => {
-    // Break caught: cold-starting despite a verified snapshot, or losing serial output, prevents the ready/smoke handshake.
+  it('cold-boots by default and forwards serial text without a distributed snapshot', async () => {
+    // Break caught: boot depends on a large prebuilt state file instead of the
+    // verified kernel and initramfs resources shipped with the extension.
     const runtime = new V86Runtime({
       V86: FakeV86 as unknown as typeof import('v86').V86,
       assetUrl: (name) => `chrome-extension://test/v86/${name}`,
@@ -155,7 +210,7 @@ describe('V86Runtime', () => {
     await boot;
     await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
 
-    expect(FakeV86.latest?.config.initial_state).toEqual({ url: 'chrome-extension://test/v86/alpine-state.bin.zst' });
+    expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
     expect(output.join('')).toBe(`${guestReadyMarker()}\nKCODE_SMOKE\n`);
   });
 
@@ -167,7 +222,7 @@ describe('V86Runtime', () => {
     });
     const deltas: string[] = [];
     runtime.onSerial((delta) => deltas.push(delta));
-    const boot = runtime.boot({ useSnapshot: false });
+    const boot = runtime.boot();
     FakeV86.latest?.emit('emulator-loaded');
     FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
     await boot;
@@ -206,20 +261,12 @@ describe('two-stage Alpine boot assets', () => {
       const rootfs = join(assets, 'kcode-rootfs.sqfs');
       await fs.writeFile(rootfs, Buffer.alloc(1));
       await fs.truncate(rootfs, standardRootfsLimit + 1);
-      await fs.writeFile(join(assets, 'alpine-state.bin.zst'), 'state');
-
       const source = JSON.parse(await fs.readFile(join(root, 'public/v86/asset-manifest.json'), 'utf8'));
-      const assetNames = ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs', 'alpine-state.bin.zst'];
+      const assetNames = ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs'];
       source.assets = Object.fromEntries(await Promise.all(assetNames.map(async (name) => [
         name,
         sha256(await fs.readFile(join(assets, name))),
       ])));
-      source.snapshot = {
-        v86Version: source.v86.packageVersion,
-        assetSetSha256: sha256(Buffer.from(JSON.stringify(Object.fromEntries(
-          assetNames.filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, source.assets[name]]),
-        )))),
-      };
       await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
 
       await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
@@ -245,9 +292,6 @@ describe('two-stage Alpine boot assets', () => {
         name,
         sha256(await fs.readFile(join(assets, name))),
       ])));
-      source.snapshot.assetSetSha256 = sha256(Buffer.from(JSON.stringify(Object.fromEntries(
-        assetNames.filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, source.assets[name]]),
-      ))));
       await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
 
       await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
@@ -273,9 +317,6 @@ describe('two-stage Alpine boot assets', () => {
         name,
         sha256(await fs.readFile(join(assets, name))),
       ])));
-      source.snapshot.assetSetSha256 = sha256(Buffer.from(JSON.stringify(Object.fromEntries(
-        assetNames.filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, source.assets[name]]),
-      ))));
       await fs.writeFile(join(assets, 'asset-manifest.json'), `${JSON.stringify(source)}\n`);
 
       await expect(execFile('node', ['scripts/verify-vm-assets.mjs'], {
@@ -337,7 +378,7 @@ const enabled = process.env.KCODE_VM_TEST === '1';
 describe.skipIf(!enabled)('packaged VM smoke', () => {
   it('mounts a real FSA directory only at /work and rolls back one transaction-scoped shell call', async () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
-    for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']) {
+    for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs']) {
       await fs.access(join(root, 'public/v86', name));
     }
     await viteBuild({ root, configFile: join(root, 'vite.config.ts') });

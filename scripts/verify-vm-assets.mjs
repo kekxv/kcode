@@ -12,7 +12,7 @@ const manifestPath = join(assetsDirectory, 'asset-manifest.json');
 const apkLockPath = join(root, 'vm', 'alpine', 'apk.lock');
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const digest = /^[a-f0-9]{64}$/;
-const expectedNames = new Set(['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs', 'alpine-state.bin.zst']);
+const expectedNames = new Set(['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs']);
 const standardRootfsLimit = 60 * 1024 * 1024;
 const initramfsWireLimit = 64 * 1024 * 1024;
 const toolchainImage = 'kcode-alpine-i386:locked';
@@ -62,7 +62,7 @@ try {
 }
 
 if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v86)
-  || !isRecord(manifest.alpine) || !isRecord(manifest.assets) || !isRecord(manifest.snapshot)) {
+  || !isRecord(manifest.alpine) || !isRecord(manifest.assets)) {
   fail('manifest has an invalid schema');
 } else {
   if (manifest.v86.packageVersion !== '0.5.458+gd96be77') fail('manifest v86 package version is not pinned');
@@ -129,13 +129,6 @@ if (!isRecord(manifest) || manifest.schemaVersion !== 1 || !isRecord(manifest.v8
     } catch (error) {
       fail(`cannot extract embedded /kcode-rootfs.sqfs (${error instanceof Error ? error.message : String(error)})`);
     }
-  }
-  const assetSet = sha256(Buffer.from(JSON.stringify(
-    Object.fromEntries([...expectedNames].filter((name) => name !== 'alpine-state.bin.zst').sort().map((name) => [name, manifest.assets[name]])),
-  )));
-  if (manifest.snapshot.v86Version !== manifest.v86.packageVersion) fail('snapshot v86 version differs from boot v86 version');
-  if (!digest.test(manifest.snapshot.assetSetSha256 ?? '') || manifest.snapshot.assetSetSha256 !== assetSet) {
-    fail('snapshot asset-set digest is missing or mismatched');
   }
 }
 

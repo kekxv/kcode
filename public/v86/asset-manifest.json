@@ -14,11 +14,6 @@
     "vgabios.bin": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880",
     "vmlinuz-virt": "e7ccc63700a4699d2f3e9ffdd6f71c89c9af18cfb24b92e76972cb1763b7c065",
     "kcode-initramfs": "27d7f9ad2b73f4060abe68d238160b0db03aabc60f23f854172611bb964a452e",
-    "alpine-state.bin.zst": "bad29491042ae276fd12427f85889fa770a2661b3fd1c6593490015423caed7b",
     "kcode-rootfs.sqfs": "415e3ef3daffee0e6d411cdbd460c4d6e9032954024813053d2d52c4400dccbe"
-  },
-  "snapshot": {
-    "v86Version": "0.5.458+gd96be77",
-    "assetSetSha256": "fc56039ec7f3771597e3f1ef74af5902e8af5da7da01b27378545f958fe5ad8e"
   }
 }

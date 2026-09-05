@@ -106,9 +106,7 @@ const hash = async (path) => createHash('sha256').update(await readFile(path)).d
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 manifest.alpine.apkLockSha256 = await hash(lockPath);
 for (const name of ['vmlinuz-virt', 'kcode-initramfs', 'kcode-rootfs.sqfs']) manifest.assets[name] = await hash(new URL(`./${name}`, `file://${manifestPath}`).pathname);
-manifest.assets['alpine-state.bin.zst'] = null;
-manifest.snapshot.assetSetSha256 = null;
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
 
-echo 'Generated reproducible vmlinuz-virt, embedded SquashFS root, and loader initramfs; build the snapshot next.'
+echo 'Generated reproducible vmlinuz-virt, embedded SquashFS root, and loader initramfs.'

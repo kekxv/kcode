@@ -4,19 +4,19 @@ import { P9Server, type TransactionPolicy } from './p9/server';
 import type { JournalSummary } from './p9/mutation-journal';
 import { normalizeWorkspacePath } from '../utils/path';
 import { toV86NetDevice } from './network-config';
+import { UserVmSnapshotStore } from './user-vm-snapshot-store';
 
 export const VM_MEMORY_BYTES = VM_MEMORY_PROFILES.standard;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
 export const MAX_COMMAND_SERIAL_BYTES = 8 * 1024 * 1024;
 export const VM_BOOT_TIMEOUT_MS = 30_000;
 
-type V86Emulator = Pick<V86, 'add_listener' | 'serial0_send' | 'destroy'>;
+type V86Emulator = Pick<V86, 'add_listener' | 'serial0_send' | 'save_state' | 'destroy'>;
 type V86Constructor = new (options: V86Options) => V86Emulator;
 type AssetUrlResolver = (name: string) => string;
+type SnapshotStore = Pick<UserVmSnapshotStore, 'load' | 'save'>;
 
 export type V86RuntimeBootConfig = {
-  /** Snapshots are valid only for the offline, no-workspace/no-relay topology. */
-  useSnapshot?: boolean;
   /** A profile is immutable for this runtime's whole lifetime. */
   memoryProfile?: MemoryProfile;
   /** WISP is the only supported guest network backend; absence means no NIC. */
@@ -26,6 +26,7 @@ export type V86RuntimeBootConfig = {
 type V86RuntimeDependencies = {
   V86?: V86Constructor;
   assetUrl?: AssetUrlResolver;
+  snapshots?: SnapshotStore;
   onOutputLimit?: () => void;
   readyTimeoutMs?: number;
 };
@@ -40,6 +41,8 @@ export class V86Runtime {
   private readonly V86: V86Constructor;
   private readonly assetUrl: AssetUrlResolver;
   private readonly onOutputLimit?: () => void;
+  private readonly snapshots: SnapshotStore;
+  private readonly hasCustomSnapshots: boolean;
   private readonly readyTimeoutMs: number;
   private emulator: V86Emulator | null = null;
   private readonly p9Server = new P9Server();
@@ -56,6 +59,8 @@ export class V86Runtime {
   constructor(dependencies: V86RuntimeDependencies = {}) {
     this.V86 = dependencies.V86 ?? V86;
     this.assetUrl = dependencies.assetUrl ?? extensionAssetUrl;
+    this.hasCustomSnapshots = dependencies.snapshots !== undefined;
+    this.snapshots = dependencies.snapshots ?? new UserVmSnapshotStore();
     this.onOutputLimit = dependencies.onOutputLimit;
     this.readyTimeoutMs = dependencies.readyTimeoutMs ?? VM_BOOT_TIMEOUT_MS;
   }
@@ -65,6 +70,11 @@ export class V86Runtime {
     const ready = this.waitForReady();
     const memoryProfile = config.memoryProfile ?? 'standard';
     const network = config.network ?? { mode: 'offline' };
+    // A state is valid only before a workspace is mounted and only with the
+    // exact offline device set and RAM geometry that created it.
+    const localSnapshot = network.mode === 'offline' && (this.hasCustomSnapshots || typeof indexedDB !== 'undefined')
+      ? await this.snapshots.load(memoryProfile).catch(() => null)
+      : null;
     const options: V86Options = {
       wasm_path: this.assetUrl('v86.wasm'),
       bios: { url: this.assetUrl('seabios.bin') },
@@ -79,22 +89,16 @@ export class V86Runtime {
         void this.p9Server.handle(request, reply);
       } },
     };
+    if (localSnapshot) options.initial_state = { buffer: localSnapshot };
     const netDevice = toV86NetDevice(network);
     if (netDevice) options.net_device = netDevice;
-    // Task 3 has not produced a profile-bound high-memory snapshot yet. A
-    // standard snapshot must never be restored under a different RAM geometry.
-    if (memoryProfile === 'standard' && network.mode === 'offline' && config.useSnapshot !== false) {
-      options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
-    }
     try {
       const emulator = new this.V86(options);
       this.emulator = emulator;
       emulator.add_listener('emulator-loaded', () => {
         if (this.bootReady) {
           this.bootReady.loaded = true;
-          // A restored snapshot resumes after its original ready marker. This
-          // command is consumed only once the serial shell is responsive, so
-          // it supplies the same readiness proof for cold and snapshot boots.
+          // The probe is consumed only once the cold-booted serial shell is responsive.
           this.sendBootProbe();
           this.bootProbeTimer = setInterval(() => {
             if (!this.bootReady) { if (this.bootProbeTimer) clearInterval(this.bootProbeTimer); this.bootProbeTimer = null; return; }
@@ -108,6 +112,11 @@ export class V86Runtime {
       this.failBoot(error instanceof Error ? error : new Error('VM_BOOT_FAILED'));
     }
     await ready;
+    // First offline launch creates a browser-local acceleration state. Storage
+    // failures are non-fatal: the verified assets remain a complete cold-boot path.
+    if (network.mode === 'offline' && !localSnapshot && this.emulator && !this.destroyed) {
+      await this.emulator.save_state().then((state) => this.snapshots.save(memoryProfile, state)).catch(() => undefined);
+    }
   }
 
   /** Binds only the authorized directory, then mounts it only at the guest /work boundary. */

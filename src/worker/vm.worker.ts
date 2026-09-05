@@ -72,10 +72,9 @@ async function dispatch(value: unknown): Promise<void> {
       runtime = new V86Runtime({
         onOutputLimit: () => outputLimit?.(),
       });
-      // A snapshot is captured before any selected directory exists. Workspace
-      // sessions cold-boot so their 9P device and serial shell are live before
-      // a directory handle can be attached.
-      await runtime.boot({ useSnapshot: false, memoryProfile, network: session.network });
+      // Workspace sessions always cold-boot so their 9P device and serial shell
+      // are live before a directory handle can be attached.
+      await runtime.boot({ memoryProfile, network: session.network });
       if (!isCurrent(generation)) return;
       send({ kind: 'VM_READY', requestId });
     } catch {
