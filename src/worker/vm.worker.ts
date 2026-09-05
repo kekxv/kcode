@@ -1,5 +1,5 @@
 import { WorkspaceSessionAuthorizer } from '../security/capabilities';
-import { isAuthorizedVMRequest, isVMRequest, type VMEvent } from '../types/protocol';
+import { isAuthorizedVMRequest, isVMRequest, normalizeMemoryProfile, type VMEvent } from '../types/protocol';
 import { WorkspaceStore } from '../utils/idb-store';
 import { V86Runtime } from './v86-runtime';
 import { ExecController } from './exec-controller';
@@ -13,6 +13,7 @@ let activeTransactionId: string | null = null;
 let execution: { requestId: string; controller: ExecController; heartbeat: ReturnType<typeof setInterval> } | null = null;
 let outputLimit: (() => void) | null = null;
 let emulatorDisposed = false;
+let initialized = false;
 
 const send = (event: VMEvent): void => self.postMessage(event);
 const fail = (requestId: string, code: string, message: string): void =>
@@ -42,11 +43,31 @@ self.onmessage = (event: MessageEvent<unknown>) => {
 };
 
 async function dispatch(value: unknown): Promise<void> {
-  if (!isVMRequest(value)) return;
+  if (!isVMRequest(value)) {
+    if (isCorrelatedInit(value)) {
+      const memoryProfile = 'memoryProfile' in value ? normalizeMemoryProfile(value.memoryProfile) : 'standard';
+      fail(
+        value.requestId,
+        memoryProfile === null ? 'VM_MEMORY_PROFILE_INVALID' : 'VM_INIT_INVALID',
+        memoryProfile === null ? 'The requested VM memory profile is invalid.' : 'The VM initialization request is invalid.',
+      );
+      self.close();
+    }
+    return;
+  }
   const { requestId } = value;
   if (value.kind === 'VM_INIT') {
+    if (initialized) {
+      invalidateRuntime();
+      fail(requestId, 'VM_REINITIALIZATION_FORBIDDEN', 'A new VM session requires a new Dedicated Worker.');
+      self.close();
+      return;
+    }
+    initialized = true;
     const generation = invalidateRuntime();
     try {
+      const memoryProfile = normalizeMemoryProfile(value.memoryProfile);
+      if (!memoryProfile) throw new Error('VM_MEMORY_PROFILE_INVALID');
       const session = authorizer.activate(value.session);
       runtime = new V86Runtime({
         onOutputLimit: () => outputLimit?.(),
@@ -54,7 +75,7 @@ async function dispatch(value: unknown): Promise<void> {
       // A snapshot is captured before any selected directory exists. Workspace
       // sessions cold-boot so their 9P device and serial shell are live before
       // a directory handle can be attached.
-      await runtime.boot({ useSnapshot: false });
+      await runtime.boot({ useSnapshot: false, memoryProfile, network: session.network });
       if (!isCurrent(generation)) return;
       send({ kind: 'VM_READY', requestId });
     } catch {
@@ -102,20 +123,27 @@ async function dispatch(value: unknown): Promise<void> {
     return;
   }
   if (value.kind === 'VM_BEGIN_TRANSACTION' || value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') {
+    if (execution) {
+      fail(requestId, 'VM_EXEC_ACTIVE', 'The transaction is frozen until the disposable execution ends.');
+      return;
+    }
     if (!runtime || !workspaceAttached) {
       fail(requestId, 'VM_RUNTIME_NOT_READY', 'The workspace must be attached before a transaction can start.');
       return;
     }
     try {
       if (value.kind === 'VM_BEGIN_TRANSACTION') {
+        if (emulatorDisposed || activeTransactionId !== null) throw new Error('VM_TRANSACTION_STATE');
         const capabilities = authorizer.transactionCapabilities();
         if (!capabilities) throw new Error('VM_UNAUTHORIZED_REQUEST');
         runtime.beginTransaction(value.transactionId, capabilities);
         activeTransactionId = value.transactionId;
       } else if (value.kind === 'VM_COMMIT_TRANSACTION') {
+        if (!emulatorDisposed || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
         await runtime.commitTransaction();
         activeTransactionId = null;
       } else {
+        if (!emulatorDisposed || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
         await runtime.rollbackTransaction();
         activeTransactionId = null;
       }
@@ -129,8 +157,34 @@ async function dispatch(value: unknown): Promise<void> {
     }
     return;
   }
-  if (!runtime || execution || emulatorDisposed) {
+  if (!runtime || !workspaceAttached || execution || emulatorDisposed) {
     fail(requestId, 'VM_RUNTIME_NOT_READY', 'The Linux runtime is not ready.');
+    return;
+  }
+  if (value.kind === 'VM_READ_FILE' || value.kind === 'VM_WRITE_FILE') {
+    const operationRuntime = runtime;
+    const generation = lifecycleGeneration;
+    const transactionId = activeTransactionId ?? 'no_transaction';
+    const startedAt = performance.now();
+    try {
+      const result = value.kind === 'VM_READ_FILE'
+        ? await operationRuntime.readFile(value.path, value.maxBytes)
+        : await operationRuntime.writeFile(value.path, value.content);
+      if (!isCurrentRuntime(generation, operationRuntime)) return;
+      emulatorDisposed = true;
+      send({
+        kind: 'VM_FILE_RESULT', requestId, ...result,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        transactionId,
+        journalSummary: operationRuntime.journalSummary(transactionId),
+      });
+      if (transactionId === 'no_transaction') { clearRuntime(); self.close(); }
+    } catch (error) {
+      if (!isCurrentRuntime(generation, operationRuntime)) return;
+      emulatorDisposed = true;
+      fail(requestId, error instanceof Error ? error.message : 'VM_FILE_OPERATION_FAILED', 'The confined workspace file operation failed.');
+      if (transactionId === 'no_transaction') { clearRuntime(); self.close(); }
+    }
     return;
   }
   const executionRuntime = runtime;
@@ -149,13 +203,18 @@ async function dispatch(value: unknown): Promise<void> {
   execution = { requestId, controller, heartbeat };
   outputLimit = () => controller.outputLimit();
   const generation = lifecycleGeneration;
-  void controller.exec(value.command, value.timeoutMs, activeTransactionId ?? 'no_transaction').then((result) => {
+  const transactionId = activeTransactionId ?? 'no_transaction';
+  void controller.exec(value.command, value.timeoutMs, transactionId).then((result) => {
     if (!isCurrentRuntime(generation, executionRuntime) || execution?.requestId !== requestId) return;
     clearInterval(heartbeat);
     execution = null;
     outputLimit = null;
     emulatorDisposed = true;
     send({ kind: 'VM_RESULT', requestId, ...result });
+    if (transactionId === 'no_transaction') {
+      clearRuntime();
+      self.close();
+    }
   }).catch((error: unknown) => {
     if (!isCurrentRuntime(generation, executionRuntime) || execution?.requestId !== requestId) return;
     clearInterval(heartbeat);
@@ -164,5 +223,17 @@ async function dispatch(value: unknown): Promise<void> {
     emulatorDisposed = true;
     const code = error instanceof Error ? error.message : 'VM_EXEC_FAILED';
     fail(requestId, code, 'The disposable Linux execution ended without a result.');
+    if (transactionId === 'no_transaction') {
+      clearRuntime();
+      self.close();
+    }
   });
+}
+
+function isCorrelatedInit(value: unknown): value is Record<string, unknown> & { kind: 'VM_INIT'; requestId: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.kind === 'VM_INIT'
+    && typeof candidate.requestId === 'string'
+    && /^[A-Za-z0-9_-]{1,64}$/.test(candidate.requestId);
 }

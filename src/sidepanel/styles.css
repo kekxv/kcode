@@ -5,7 +5,9 @@ button, textarea { font: inherit; }
 button { min-height: 2.25rem; }
 .side-panel { display: grid; grid-template-rows: auto 1fr auto; gap: .75rem; height: 100vh; padding: .75rem; }
 .status-bar { display: flex; flex-wrap: wrap; gap: .4rem .8rem; color: #b7c3cf; font-size: .82rem; }
-.workspace-controls { display: flex; gap: .5rem; align-items: center; }
+.workspace-controls, .network-settings { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.network-settings small { flex-basis: 100%; overflow-wrap: anywhere; }
+.network-settings [role="alert"] { color: #ff9d9d; }
 .panel-content { display: grid; grid-template-columns: 1fr; min-height: 0; gap: .75rem; }
 .chat-feed, .terminal-pane { min-height: 10rem; overflow: auto; border: 1px solid #34404d; border-radius: .35rem; padding: .5rem; }
 .terminal-pane { background: #050708; }

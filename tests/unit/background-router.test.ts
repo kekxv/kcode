@@ -12,6 +12,68 @@ const makePort = (name: string, tabId?: number) => ({
 });
 
 describe('PortRouter', () => {
+  it('forwards an authenticated side-panel cancellation only to the matching pending content request', async () => {
+    // Break caught: local cancellation without router cleanup leaves the page observer streaming into a later task.
+    const sidePanel = makePort('kcode-sidepanel');
+    const content = makePort('kcode-content', 17);
+    const router = new PortRouter({ tabs: { get: vi.fn().mockResolvedValue({ id: 17, url: 'https://chat.deepseek.com/' }) } });
+    router.setSidePanelPort(sidePanel as never);
+    router.setContentPort(content as never);
+    await router.fromSidePanel({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'req-cancel', targetTabId: 17, prompt: 'hello' });
+    content.postMessage.mockClear();
+
+    await router.fromSidePanel({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-cancel', targetTabId: 17 });
+
+    expect(content.postMessage).toHaveBeenCalledWith({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-cancel' });
+    content.postMessage.mockClear();
+    await router.fromContent(content as never, { protocolVersion: 1, kind: 'CONTENT_RESPONSE_DONE', requestId: 'req-cancel' });
+    expect(sidePanel.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-cancel', kind: 'CONTENT_RESPONSE_DONE' }));
+  });
+
+  it('aborts the active content request when its owning side-panel session is replaced', async () => {
+    // Break caught: deleting router pending state without notifying content leaves the old page observer active.
+    const originalPanel = makePort('kcode-sidepanel');
+    const replacementPanel = makePort('kcode-sidepanel');
+    const content = makePort('kcode-content', 17);
+    const router = new PortRouter({
+      tabs: { get: vi.fn().mockResolvedValue({ id: 17, url: 'https://chat.deepseek.com/' }) },
+    });
+    router.setSidePanelPort(originalPanel as never);
+    router.setContentPort(content as never);
+    await router.fromSidePanel({
+      protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'req-session', targetTabId: 17, prompt: 'hello',
+    });
+    content.postMessage.mockClear();
+
+    router.setSidePanelPort(replacementPanel as never);
+
+    expect(content.postMessage).toHaveBeenCalledWith({
+      protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-session',
+    });
+  });
+
+  it('aborts the old content controller when its authenticated Port is replaced', async () => {
+    // Break caught: replacing the tab Port without cancellation lets the stale content script continue observing the page.
+    const panel = makePort('kcode-sidepanel');
+    const oldContent = makePort('kcode-content', 17);
+    const replacement = makePort('kcode-content', 17);
+    const router = new PortRouter({
+      tabs: { get: vi.fn().mockResolvedValue({ id: 17, url: 'https://chat.deepseek.com/' }) },
+    });
+    router.setSidePanelPort(panel as never);
+    router.setContentPort(oldContent as never);
+    await router.fromSidePanel({
+      protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'req-port', targetTabId: 17, prompt: 'hello',
+    });
+    oldContent.postMessage.mockClear();
+
+    router.setContentPort(replacement as never);
+
+    expect(oldContent.postMessage).toHaveBeenCalledWith({
+      protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-port',
+    });
+  });
+
   it('routes a content response without embedding callbacks', async () => {
     const sidePanel = makePort('kcode-sidepanel');
     const content17 = makePort('kcode-content', 17);

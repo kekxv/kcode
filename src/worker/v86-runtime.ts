@@ -1,8 +1,11 @@
 import { V86, type V86Options } from 'v86';
+import { VM_MEMORY_PROFILES, type MemoryProfile, type NetworkMode } from '../types/protocol';
 import { P9Server, type TransactionPolicy } from './p9/server';
 import type { JournalSummary } from './p9/mutation-journal';
+import { normalizeWorkspacePath } from '../utils/path';
+import { toV86NetDevice } from './network-config';
 
-export const VM_MEMORY_BYTES = 256 * 1024 * 1024;
+export const VM_MEMORY_BYTES = VM_MEMORY_PROFILES.standard;
 export const MAX_SERIAL_DELTA_BYTES = 64 * 1024;
 export const MAX_COMMAND_SERIAL_BYTES = 8 * 1024 * 1024;
 export const VM_BOOT_TIMEOUT_MS = 30_000;
@@ -14,6 +17,10 @@ type AssetUrlResolver = (name: string) => string;
 export type V86RuntimeBootConfig = {
   /** Snapshots are valid only for the offline, no-workspace/no-relay topology. */
   useSnapshot?: boolean;
+  /** A profile is immutable for this runtime's whole lifetime. */
+  memoryProfile?: MemoryProfile;
+  /** WISP is the only supported guest network backend; absence means no NIC. */
+  network?: NetworkMode;
 };
 
 type V86RuntimeDependencies = {
@@ -56,13 +63,15 @@ export class V86Runtime {
   async boot(config: V86RuntimeBootConfig = {}): Promise<void> {
     if (this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_BOOTABLE');
     const ready = this.waitForReady();
+    const memoryProfile = config.memoryProfile ?? 'standard';
+    const network = config.network ?? { mode: 'offline' };
     const options: V86Options = {
       wasm_path: this.assetUrl('v86.wasm'),
       bios: { url: this.assetUrl('seabios.bin') },
       vga_bios: { url: this.assetUrl('vgabios.bin') },
       bzimage: { url: this.assetUrl('vmlinuz-virt') },
       initrd: { url: this.assetUrl('kcode-initramfs') },
-      memory_size: VM_MEMORY_BYTES,
+      memory_size: VM_MEMORY_PROFILES[memoryProfile],
       autostart: true,
       cmdline: 'console=ttyS0',
       // Preserve the single virtio-9P device for the authorized Task 7 backend.
@@ -70,7 +79,13 @@ export class V86Runtime {
         void this.p9Server.handle(request, reply);
       } },
     };
-    if (config.useSnapshot !== false) options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
+    const netDevice = toV86NetDevice(network);
+    if (netDevice) options.net_device = netDevice;
+    // Task 3 has not produced a profile-bound high-memory snapshot yet. A
+    // standard snapshot must never be restored under a different RAM geometry.
+    if (memoryProfile === 'standard' && network.mode === 'offline' && config.useSnapshot !== false) {
+      options.initial_state = { url: this.assetUrl('alpine-state.bin.zst') };
+    }
     try {
       const emulator = new this.V86(options);
       this.emulator = emulator;
@@ -123,6 +138,18 @@ export class V86Runtime {
   }
 
   journalSummary(transactionId: string): JournalSummary { return this.p9Server.journalSummary(transactionId); }
+
+  async readFile(path: string, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+    if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
+    const result = await this.p9Server.readFile(normalizeWorkspacePath(path), maxBytes);
+    return { text: new TextDecoder().decode(result.bytes), truncated: result.truncated };
+  }
+
+  async writeFile(path: string, content: string): Promise<{ text: string; truncated: boolean }> {
+    if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
+    await this.p9Server.writeFile(normalizeWorkspacePath(path), new TextEncoder().encode(content));
+    return { text: '', truncated: false };
+  }
 
   serialSend(data: string): void {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');

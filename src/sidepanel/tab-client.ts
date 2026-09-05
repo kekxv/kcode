@@ -9,11 +9,12 @@ export type ConnectedTab = { id: number; title: string };
 export type PromptHandlers = {
   onDelta?: (delta: string) => void;
   onDone?: () => void;
+  signal?: AbortSignal;
 };
 
 type Pending =
   | { kind: 'list'; resolve: (tabs: ConnectedTab[]) => void; reject: (error: Error) => void }
-  | { kind: 'prompt'; handlers: PromptHandlers; resolve: () => void; reject: (error: Error) => void };
+  | { kind: 'prompt'; handlers: PromptHandlers; resolve: () => void; reject: (error: Error) => void; cleanup: () => void };
 type PortFactory = () => chrome.runtime.Port;
 const error = (code: string): Error => new Error(code);
 
@@ -33,7 +34,28 @@ export class TabClient {
   }
 
   sendPrompt(tabId: number, prompt: string, handlers: PromptHandlers = {}): Promise<void> {
-    return this.send('CONTENT_SEND_PROMPT', { targetTabId: tabId, prompt }, (resolve, reject) => ({ kind: 'prompt', handlers, resolve, reject }));
+    const requestId = createRequestId();
+    if (handlers.signal?.aborted) return Promise.reject(error(String(handlers.signal.reason || 'USER_CANCELLED')));
+    return new Promise<void>((resolve, reject) => {
+      const abort = (): void => {
+        const pending = this.pending.get(requestId);
+        if (!pending || pending.kind !== 'prompt') return;
+        this.pending.delete(requestId);
+        pending.cleanup();
+        try { this.port.postMessage({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId, targetTabId: tabId }); } catch { /* Local rejection is authoritative. */ }
+        reject(error(String(handlers.signal?.reason || 'USER_CANCELLED')));
+      };
+      const cleanup = (): void => handlers.signal?.removeEventListener('abort', abort);
+      this.pending.set(requestId, { kind: 'prompt', handlers, resolve, reject, cleanup });
+      handlers.signal?.addEventListener('abort', abort, { once: true });
+      try {
+        this.port.postMessage({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId, targetTabId: tabId, prompt });
+      } catch {
+        this.pending.delete(requestId);
+        cleanup();
+        reject(error('TAB_PORT_DISCONNECTED'));
+      }
+    });
   }
 
   dispose(): void {
@@ -81,6 +103,7 @@ export class TabClient {
       return;
     }
     this.pending.delete(event.requestId);
+    pending.cleanup();
     if (event.kind === 'CONTENT_RESPONSE_DONE') {
       pending.handlers.onDone?.();
       pending.resolve();
@@ -90,7 +113,10 @@ export class TabClient {
   }
 
   private rejectAll(code: string): void {
-    for (const [, pending] of this.pending) pending.reject(error(code));
+    for (const [, pending] of this.pending) {
+      if (pending.kind === 'prompt') pending.cleanup();
+      pending.reject(error(code));
+    }
     this.pending.clear();
   }
 }

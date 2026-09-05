@@ -66,13 +66,31 @@ export class FsaBackend {
     });
   }
 
+  async replaceFile(segments: readonly string[], data: Uint8Array): Promise<void> {
+    this.require('write'); checkSegments(segments);
+    if (!(data instanceof Uint8Array) || data.byteLength > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'File size exceeds mutation limit.');
+    const parent = segments.slice(0, -1); const name = segments.at(-1);
+    if (!name) p9(ERRNO.EINVAL, 'A file path is required.');
+    const fileName = name as string;
+    await this.withLocks([segments, parent], async () => {
+      const directory = await this.directory(parent);
+      try {
+        const handle = await this.deadline(directory.getFileHandle(fileName, { create: true }));
+        await this.confine(handle, segments);
+        const writable = await this.deadline(handle.createWritable());
+        await this.deadline(writable.write(data as unknown as FileSystemWriteChunkType));
+        await this.deadline(writable.close());
+      } catch (error) { mapDomException(error); }
+    });
+  }
+
   async truncate(segments: readonly string[], size: number): Promise<void> {
     this.require('write'); checkSegments(segments); this.offset(size); if (size > MAX_FILE_BYTES) p9(ERRNO.ENOSPC, 'File size exceeds mutation limit.');
     await this.withLocks([segments], async () => { const handle = await this.file(segments); try { const writable = await this.deadline(handle.createWritable({ keepExistingData: true })); await this.deadline(writable.truncate(size)); await this.deadline(writable.close()); } catch (error) { mapDomException(error); } });
   }
 
   async stat(segments: readonly string[]): Promise<FsaStat> {
-    this.require('read'); checkSegments(segments); const handle = await this.handle(segments); if (handle.kind === 'directory') return { kind: 'directory', size: 0, lastModified: 0 };
+    this.requireMetadata(); checkSegments(segments); const handle = await this.handle(segments); if (handle.kind === 'directory') return { kind: 'directory', size: 0, lastModified: 0 };
     try { const file = await this.deadline((handle as FileSystemFileHandle).getFile()); return { kind: 'file', size: file.size, lastModified: file.lastModified }; } catch (error) { return mapDomException(error); }
   }
 
@@ -122,6 +140,7 @@ export class FsaBackend {
   }
 
   private require(capability: WorkspaceCapability): void { if (!hasWorkspaceCapability({ mode: 'workspace', workspaceId: 'internal', capabilities: this.policy, network: { mode: 'offline' } }, capability)) p9(ERRNO.EACCES, `Missing ${capability} capability.`); }
+  private requireMetadata(): void { if (!this.policy.some((capability) => capability === 'read' || capability === 'write' || capability === 'delete')) p9(ERRNO.EACCES, 'Missing metadata capability.'); }
   private offset(value: number): void { if (!Number.isSafeInteger(value) || value < 0) p9(ERRNO.EINVAL, 'Invalid file offset.'); }
   private count(value: number): void { if (!Number.isSafeInteger(value) || value < 0) p9(ERRNO.EINVAL, 'Invalid byte count.'); }
   async matchesSnapshot(segments: readonly string[], expected: FsaSnapshot): Promise<boolean> {

@@ -11,6 +11,22 @@ const frame = (type: number, tag: number, body: Uint8Array<ArrayBufferLike> = ne
 const version = () => frame(MESSAGE.Tversion, 1, new Writer().u32(65_536).string('9P2000.L').finish());
 
 describe('P9Server lifecycle', () => {
+  it('provides bounded direct file RPCs through the same backend and mutation journal', async () => {
+    // Break caught: side-panel file tools must not bypass FSA confinement, immutable capability checks, or rollback preimages.
+    const root = new MemoryFsaRoot();
+    const file = await root.getFileHandle('notes.txt', { create: true });
+    const initial = await file.createWritable(); await initial.write(new TextEncoder().encode('before')); await initial.close();
+    const server = new P9Server(await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, ['read', 'write']));
+    server.setTransactionPolicy({ transactionId: 'direct_file', capabilities: ['read', 'write'] });
+
+    await expect(server.readFile(['notes.txt'], 4)).resolves.toEqual({ bytes: new TextEncoder().encode('befo'), truncated: true });
+    await server.writeFile(['notes.txt'], new TextEncoder().encode('after'));
+    expect(new TextDecoder().decode(new Uint8Array(await (await file.getFile()).arrayBuffer()))).toBe('after');
+    expect(server.journalSummary('direct_file').state).toBe('dirty');
+    await server.rollbackTransaction();
+    expect(new TextDecoder().decode(new Uint8Array(await (await file.getFile()).arrayBuffer()))).toBe('before');
+  });
+
   it('journals a created file and removes it again on explicit rollback', async () => {
     // Break caught: a 9P create without durable preimage metadata survives rollback and leaves host changes behind.
     const root = new MemoryFsaRoot();

@@ -20,17 +20,17 @@ const sessionArea = () => {
 
 describe('RiskConsentStore', () => {
   it('defaults to no consent and binds a grant to the normalized complete relay URL', async () => {
-    // Break caught: a grant remains valid after a relay path/query changes, widening network authority.
+    // Break caught: a grant remains valid after a relay path changes, widening network authority.
     const session = sessionArea();
     const store = new RiskConsentStore(session);
-    const context = { workspaceId: 'workspace-1', relayUrl: 'wss://relay.example:443/edge?tenant=a' };
+    const context = { workspaceId: 'workspace-1', relayUrl: 'wss://relay.example:443/edge' };
     expect(await store.hasValid('auto', context)).toBe(false);
     activeGesture();
     await store.grant(['auto', 'workspace-networked'], context);
 
     expect(session.set).toHaveBeenCalledTimes(1);
-    expect(await store.hasValid('auto', { ...context, relayUrl: 'wss://relay.example/edge?tenant=a' })).toBe(true);
-    expect(await store.hasValid('workspace-networked', { ...context, relayUrl: 'wss://relay.example/other?tenant=a' })).toBe(false);
+    expect(await store.hasValid('auto', { ...context, relayUrl: 'wss://relay.example/edge' })).toBe(true);
+    expect(await store.hasValid('workspace-networked', { ...context, relayUrl: 'wss://relay.example/other' })).toBe(false);
     expect(await store.hasValid('auto', { ...context, workspaceId: 'workspace-2' })).toBe(false);
   });
 

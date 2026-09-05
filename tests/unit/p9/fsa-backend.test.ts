@@ -24,6 +24,18 @@ describe('FsaBackend capability confinement', () => {
     await expect(backend.stat(['visible.txt'])).rejects.toMatchObject({ errno: 13 });
   });
 
+  it.each(['write', 'delete'] as const)('allows the minimum stat walk needed by a %s-only shell without exposing bytes or directory listings', async (capability) => {
+    // Break caught: write/delete-only bash cannot resolve an explicitly named target, or gains unintended file/list read access when fixed.
+    const root = new MemoryFsaRoot();
+    const file = await root.getFileHandle('target.txt', { create: true });
+    const writable = await file.createWritable(); await writable.write(new TextEncoder().encode('secret')); await writable.close();
+    const backend = await FsaBackend.attach(root as unknown as FileSystemDirectoryHandle, [capability]);
+
+    await expect(backend.stat(['target.txt'])).resolves.toMatchObject({ kind: 'file', size: 6 });
+    await expect(backend.read(['target.txt'], 0, 32)).rejects.toMatchObject({ errno: 13 });
+    await expect(backend.list([])).rejects.toMatchObject({ errno: 13 });
+  });
+
   it('holds a timed-out mutation lock until the underlying FSA operation settles', async () => {
     // Break caught: Promise.race can report ETIMEDOUT while createWritable still mutates, so releasing this lock permits a concurrent conflicting write.
     vi.useFakeTimers();

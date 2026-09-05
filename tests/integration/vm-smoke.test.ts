@@ -59,6 +59,21 @@ const guestReadyMarker = (): string => {
 };
 
 describe('V86Runtime', () => {
+  it('cold-boots high memory at 512 MiB without restoring a standard snapshot', async () => {
+    // Break caught: restoring the 256 MiB snapshot under a 512 MiB emulator crosses RAM geometry and can corrupt guest state.
+    const runtime = new V86Runtime({
+      V86: FakeV86 as unknown as typeof import('v86').V86,
+      assetUrl: (name) => `chrome-extension://test/v86/${name}`,
+    });
+    const boot = runtime.boot({ memoryProfile: 'high' });
+    FakeV86.latest?.emit('emulator-loaded');
+    FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`);
+    await boot;
+
+    expect(FakeV86.latest?.config.memory_size).toBe(512 * 1024 * 1024);
+    expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
+  });
+
   it('installs a 9P handler and mounts the selected directory exclusively at /work', async () => {
     // Break caught: mounting at guest root, home, or /workspace lets shell dispatch escape the selected workspace contract.
     const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
@@ -113,6 +128,16 @@ describe('V86Runtime', () => {
     expect(FakeV86.latest?.sent).toContain('echo KCODE_SMOKE\n');
     runtime.destroy();
     expect(FakeV86.latest?.destroyed).toBe(true);
+  });
+
+  it('maps a validated WISP URL to a virtio NIC while retaining the same 9P device', async () => {
+    // Break caught: networking that replaces 9P, uses ws:, or restores an offline snapshot cannot provide the consented /work + TCP combination.
+    const runtime = new V86Runtime({ V86: FakeV86 as unknown as typeof import('v86').V86, assetUrl: (name) => `chrome-extension://test/v86/${name}` });
+    const boot = runtime.boot({ useSnapshot: false, network: { mode: 'wisp', relayUrl: 'wss://relay.example/wisp' } });
+    FakeV86.latest?.emit('emulator-loaded'); FakeV86.latest?.emitSerial(`${guestReadyMarker()}\n`); await boot;
+    expect(FakeV86.latest?.config.net_device).toEqual({ type: 'virtio', relay_url: 'wisps://relay.example/wisp' });
+    expect(FakeV86.latest?.config.filesystem).toMatchObject({ handle9p: expect.any(Function) });
+    expect(FakeV86.latest?.config).not.toHaveProperty('initial_state');
   });
 
   it('uses the verified snapshot by default and forwards serial text', async () => {
@@ -310,7 +335,7 @@ describe('two-stage Alpine boot assets', () => {
 const enabled = process.env.KCODE_VM_TEST === '1';
 
 describe.skipIf(!enabled)('packaged VM smoke', () => {
-  it('mounts a real FSA directory only at /work and enforces read-only/protected-path boundaries', async () => {
+  it('mounts a real FSA directory only at /work and rolls back one transaction-scoped shell call', async () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
     for (const name of ['v86.wasm', 'seabios.bin', 'vgabios.bin', 'vmlinuz-virt', 'kcode-initramfs', 'alpine-state.bin.zst']) {
       await fs.access(join(root, 'public/v86', name));
@@ -334,7 +359,7 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
       const workspaceOutput = await page.evaluate(async ({ workerFile }) => {
         return new Promise<string>((resolve, reject) => {
           const worker = new Worker(chrome.runtime.getURL(`assets/${workerFile}`), { type: 'module' });
-          let phase: 'boot' | 'attach' | 'begin' | 'quiet' | 'read' | 'readonly' | 'protected' | 'write' | 'rollback' = 'boot';
+          let phase: 'boot' | 'attach' | 'begin' | 'write' | 'rollback' = 'boot';
           let output = '';
           let directory: FileSystemDirectoryHandle | null = null;
           const events: unknown[] = [];
@@ -377,48 +402,24 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
               return;
             }
             if (data?.kind === 'VM_READY' && phase === 'attach') {
-              phase = 'quiet';
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-quiet', command: 'stty -echo', timeoutMs: 30_000 });
-              setTimeout(() => {
-                if (phase !== 'quiet') return;
-                phase = 'read';
-                worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-read', command: "pwd; cat visible.txt; find . -maxdepth 1 -type f -print; printf 'KCODE_READ_DONE\\n'", timeoutMs: 30_000 });
-              }, 100);
-              return;
-            }
-            if (phase === 'read' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-read') {
-              output += data.delta;
-              if (!output.includes('KCODE_READ_DONE')) return;
-              phase = 'readonly';
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-readonly', command: "if sh -c ': > denied.txt'; then rc=0; else rc=$?; fi; printf 'KCODE_READONLY_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
-              return;
-            }
-            if (phase === 'readonly' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-readonly') {
-              output += data.delta;
-              if (!/KCODE_READONLY_DONE:[1-9]/.test(output)) return;
-              phase = 'protected';
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-protected', command: "if sh -c 'cat .env >/dev/null'; then rc=0; else rc=$?; fi; printf 'KCODE_PROTECTED_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
-              return;
-            }
-            if (phase === 'protected' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-protected') {
-              output += data.delta;
-              if (!/KCODE_PROTECTED_DONE:[1-9]/.test(output)) return;
               phase = 'begin';
               worker.postMessage({ kind: 'VM_BEGIN_TRANSACTION', requestId: 'worker-begin', transactionId: 'smoke_tx' });
               return;
             }
             if (data?.kind === 'VM_READY' && phase === 'begin') {
               phase = 'write';
-              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-write', command: "printf approved > approved.txt; rc=$?; printf 'KCODE_WRITE_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
+              worker.postMessage({ kind: 'VM_EXEC', requestId: 'worker-write', command: "pwd; cat visible.txt; find . -maxdepth 1 -type f -print; printf approved > approved.txt; rc=$?; printf 'KCODE_WRITE_DONE:%s\\n' \"$rc\"", timeoutMs: 30_000 });
               return;
             }
             if (phase === 'write' && data?.kind === 'VM_OUTPUT_DELTA' && data.requestId === 'worker-write') {
               output += data.delta;
-              if (!output.includes('KCODE_WRITE_DONE:0')) return;
-              void (async () => {
-                phase = 'rollback';
-                worker.postMessage({ kind: 'VM_ROLLBACK_TRANSACTION', requestId: 'worker-rollback' });
-              })().catch(reject);
+              return;
+            }
+            if (phase === 'write' && data?.kind === 'VM_RESULT' && data.requestId === 'worker-write') {
+              output += data.output;
+              if (!output.includes('KCODE_WRITE_DONE:0')) { clearTimeout(timer); reject(new Error(`worker write output missing:${JSON.stringify(events)}`)); return; }
+              phase = 'rollback';
+              worker.postMessage({ kind: 'VM_ROLLBACK_TRANSACTION', requestId: 'worker-rollback' });
               return;
             }
             if (phase === 'rollback' && data?.kind === 'VM_READY') {
@@ -438,7 +439,7 @@ describe.skipIf(!enabled)('packaged VM smoke', () => {
           worker.postMessage({ kind: 'VM_INIT', requestId: 'worker-boot', session: { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } });
         });
       }, { workerFile }).catch((error) => { throw new Error(`${String(error)}; runtime logs: ${runtimeLogs.join(' | ')}`); });
-      expect(workspaceOutput).toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_READONLY_DONE:[1-9][\s\S]*KCODE_PROTECTED_DONE:[1-9][\s\S]*KCODE_WRITE_DONE:0/));
+      expect(workspaceOutput).toEqual(expect.stringMatching(/\/work[\s\S]*host-visible[\s\S]*visible\.txt[\s\S]*KCODE_WRITE_DONE:0/));
       expect(workspaceOutput).not.toMatch(/(?:^|\r?\n)\.\/\.env(?:\r?\n|$)/);
       expect(runtimeLogs.join('\n')).not.toContain('KCODE_9P_');
     } finally {

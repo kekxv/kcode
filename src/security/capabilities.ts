@@ -1,7 +1,7 @@
 import type { NetworkMode, WorkspaceCapability, WorkspaceSession } from '../types/protocol';
 
 type PlainRecord = Record<string, unknown>;
-const MAX_RELAY_URL_BYTES = 384 * 1024;
+const MAX_RELAY_URL_BYTES = 2048;
 const encoder = new TextEncoder();
 
 const isPlainRecord = (value: unknown): value is PlainRecord =>
@@ -19,13 +19,21 @@ const isCapability = (value: unknown): value is WorkspaceCapability =>
   value === 'read' || value === 'write' || value === 'delete';
 
 export const isValidWispRelayUrl = (value: unknown): value is string => {
-  if (typeof value !== 'string' || encoder.encode(value).byteLength > MAX_RELAY_URL_BYTES) return false;
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()
+    || /[\u0000-\u0020\u007f]/u.test(value) || encoder.encode(value).byteLength > MAX_RELAY_URL_BYTES
+    || !/^wss:\/\/[^/]/.test(value) || /%2e/i.test(value)) return false;
   try {
     const url = new URL(value);
+    let pathname = url.pathname;
+    for (let layer = 0; layer < 2; layer += 1) {
+      if (pathname.split('/').some((segment) => segment === '.' || segment === '..')) return false;
+      pathname = decodeURIComponent(pathname);
+    }
     return url.protocol === 'wss:'
       && url.hostname !== ''
       && url.username === ''
       && url.password === ''
+      && url.search === ''
       && url.hash === '';
   } catch {
     return false;
@@ -106,6 +114,10 @@ export class WorkspaceSessionAuthorizer {
 
   workspaceBinding(): string | null {
     return this.activeSession?.workspaceId ?? null;
+  }
+
+  hasCapability(capability: WorkspaceCapability): boolean {
+    return this.activeSession?.capabilities.includes(capability) === true;
   }
 
   /** Mutation authority is fixed at VM_INIT and cannot be supplied by a later guest-facing request. */

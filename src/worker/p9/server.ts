@@ -31,6 +31,7 @@ export class P9Server {
   private readonly activeMutations = new Set<number>();
   private mutationPoisoned = false;
   private transactionFinalizing = false;
+  private directMutationTag = -1;
   private readonly mutationIdleWaiters = new Set<() => void>();
   constructor(backend?: FsaBackend, private readonly journalFactory: JournalFactory = async (workspaceBinding, transactionId) => {
     if (typeof navigator !== 'undefined' && typeof navigator.storage !== 'undefined') return OpfsJournalStorage.open(workspaceBinding, transactionId);
@@ -66,6 +67,22 @@ export class P9Server {
   journalSummary(transactionId: string): JournalSummary {
     if (this.journal && this.journalTransactionId === transactionId) return this.journal.summary();
     return { transactionId, state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 };
+  }
+
+  async readFile(path: readonly string[], maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_048_576) throw new P9Error(ERRNO.EINVAL, 'Invalid direct read limit.');
+    const backend = this.needBackend();
+    const stat = await backend.stat(path);
+    if (stat.kind !== 'file') throw new P9Error(ERRNO.EISDIR, 'Directory cannot be used as a file.');
+    return { bytes: await backend.read(path, 0, Math.min(stat.size, maxBytes)), truncated: stat.size > maxBytes };
+  }
+
+  async writeFile(path: readonly string[], bytes: Uint8Array): Promise<void> {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength > 1_048_576) throw new P9Error(ERRNO.ENOSPC, 'Direct write exceeds tool limit.');
+    const backend = this.needBackend();
+    const original = await backend.snapshot(path);
+    const tag = this.directMutationTag--;
+    await this.mutate(tag, original.exists ? 'write' : 'create', [{ path, resultingBytes: bytes.byteLength, original }], () => backend.replaceFile(path, bytes), bytes.byteLength);
   }
 
   async handle(frame: Uint8Array, reply: (response: Uint8Array) => void): Promise<void> {

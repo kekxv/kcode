@@ -14,6 +14,7 @@ class FakeRuntime {
   transaction: { transactionId: string; capabilities: readonly string[] } | null = null;
   workspaceBinding: string | null = null;
   readonly attachedHandles: FileSystemDirectoryHandle[] = [];
+  readonly fileCalls: Array<{ kind: 'read' | 'write'; path: string; value: number | string }> = [];
 
   constructor(_options: unknown) {
     FakeRuntime.instances.push(this);
@@ -39,6 +40,8 @@ class FakeRuntime {
   serialSend(command: string): void { this.sent.push(command); }
   resetCommandSerialBudget(): void {}
   journalSummary(transactionId: string) { return { transactionId, state: 'clean' as const, entries: [], journalBytes: 0, writtenBytes: 0 }; }
+  async readFile(path: string, maxBytes: number) { this.fileCalls.push({ kind: 'read', path, value: maxBytes }); return { text: 'file', truncated: false }; }
+  async writeFile(path: string, content: string) { this.fileCalls.push({ kind: 'write', path, value: content }); return { text: '', truncated: false }; }
 
   destroy(): void {
     this.destroyed = true;
@@ -68,20 +71,139 @@ describe('vm.worker lifecycle correlation', () => {
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
-    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false });
+    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false, memoryProfile: 'standard', network: { mode: 'offline' } });
+  });
+
+  it('passes the accepted high-memory profile only to a fresh cold boot', async () => {
+    // Break caught: the worker can accidentally normalize high back to standard or request a reusable snapshot before Task 3 binds one to 512 MiB.
+    vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session, memoryProfile: 'high' } } as MessageEvent);
+    expect(FakeRuntime.instances[0].bootConfig).toEqual({ useSnapshot: false, memoryProfile: 'high', network: { mode: 'offline' } });
+  });
+
+  it('fails closed and retires a Dedicated Worker that receives a second VM_INIT', async () => {
+    // Break caught: reinitializing v86 in one native Worker can carry handles, listeners, or authority across RAM/session generations.
+    const postMessage = vi.fn();
+    const close = vi.fn();
+    vi.stubGlobal('self', { postMessage, close, onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'first', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'first' }));
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'second', session, memoryProfile: 'high' } } as MessageEvent);
+
+    expect(FakeRuntime.instances).toHaveLength(1);
+    expect(FakeRuntime.instances[0].destroyed).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'second', code: 'VM_REINITIALIZATION_FORBIDDEN' }));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('returns a correlated error for an invalid VM_INIT memory profile', async () => {
+    // Break caught: dropping a malformed but correlated startup request leaves the VMClient pending until an unrelated watchdog fires.
+    const postMessage = vi.fn();
+    const close = vi.fn();
+    vi.stubGlobal('self', { postMessage, close, onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'invalid-profile', session, memoryProfile: 'huge' } } as MessageEvent);
+
+    expect(FakeRuntime.instances).toHaveLength(0);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'invalid-profile', code: 'VM_MEMORY_PROFILE_INVALID' }));
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('dispatches every guest command from the exclusive /work mount point', async () => {
     // Break caught: shell commands run from guest root/home can access a different filesystem even while /work is correctly mounted.
+    class TestDirectoryHandle {}
     vi.stubGlobal('self', { postMessage: vi.fn(), close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
     vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
     await import('../../src/worker/vm.worker');
     const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
     FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await Promise.resolve(); await Promise.resolve();
     worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
     expect(FakeRuntime.instances[0].sent).toHaveLength(1);
     expect(FakeRuntime.instances[0].sent[0]).toContain('cd /work && exec /bin/sh');
+  });
+
+  it('dispatches confined file RPCs without converting path or content into shell commands', async () => {
+    // Break caught: quoting a hostile path/content into a guest command would turn read_file/write_file into shell injection primitives.
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    const writeSession = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['write'], network: { mode: 'offline' } } as const;
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session: writeSession } } as MessageEvent);
+    const runtime = FakeRuntime.instances[0]; runtime.resolve();
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'boot' }));
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' }));
+    worker.onmessage?.({ data: { kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_file' } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'begin' }));
+    worker.onmessage?.({ data: { kind: 'VM_WRITE_FILE', requestId: 'write', path: "a'b.txt", content: '$(id)' } } as MessageEvent);
+
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_FILE_RESULT', requestId: 'write', transactionId: 'tx_file' })));
+    expect(runtime.fileCalls).toEqual([{ kind: 'write', path: "a'b.txt", value: '$(id)' }]);
+    expect(runtime.sent).toEqual([]);
+  });
+
+  it('rejects execution before the current authorized workspace is attached', async () => {
+    // Break caught: an empty guest /work directory is not the selected FSA directory and must never be used as an execution capability.
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
+
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'unmounted', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
+
+    expect(FakeRuntime.instances[0].sent).toEqual([]);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'unmounted', code: 'VM_RUNTIME_NOT_READY' }));
+  });
+
+  it('freezes transaction authority while an execution is live', async () => {
+    // Break caught: changing the P9 transaction mid-command makes the command result describe a different journal than the one that performed its writes.
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn();
+    vi.stubGlobal('self', { postMessage, close: vi.fn(), onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    const writeSession = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write', 'delete'], network: { mode: 'offline' } } as const;
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session: writeSession } } as MessageEvent);
+    FakeRuntime.instances[0].resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' }));
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'sleep 1', timeoutMs: 30_000 } } as MessageEvent);
+
+    worker.onmessage?.({ data: { kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_1' } } as MessageEvent);
+    worker.onmessage?.({ data: { kind: 'VM_COMMIT_TRANSACTION', requestId: 'commit' } } as MessageEvent);
+    worker.onmessage?.({ data: { kind: 'VM_ROLLBACK_TRANSACTION', requestId: 'rollback' } } as MessageEvent);
+
+    expect(FakeRuntime.instances[0].transaction).toBeNull();
+    for (const requestId of ['begin', 'commit', 'rollback']) {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId, code: 'VM_EXEC_ACTIVE' }));
+    }
   });
 
   it('permits journal finalization but never a second command after disposal destroys v86', async () => {
@@ -117,8 +239,31 @@ describe('vm.worker lifecycle correlation', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it('keeps the newest VM session correlated after readiness and ignores a superseded boot', async () => {
-    // Break caught: a late failure from an older boot destroys the newer VM or sends serial to the wrong request.
+  it('closes the Worker immediately after an untransactioned result destroys v86', async () => {
+    // Break caught: retaining a no-journal Worker after its disposable VM is gone retains a cloned workspace capability and prevents fresh generations.
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn();
+    const close = vi.fn();
+    vi.stubGlobal('self', { postMessage, close, onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const worker = globalThis.self as unknown as { onmessage: ((event: MessageEvent<unknown>) => void) | null };
+    worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'boot', session } } as MessageEvent);
+    const runtime = FakeRuntime.instances[0]; runtime.resolve(); await Promise.resolve(); await Promise.resolve();
+    worker.onmessage?.({ data: { kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' }));
+    worker.onmessage?.({ data: { kind: 'VM_EXEC', requestId: 'run', command: 'pwd', timeoutMs: 30_000 } } as MessageEvent);
+    const nonce = runtime.sent[0].match(/KCODE_BEGIN:([^\\]+)\\037/)?.[1];
+    runtime.emit(`\x1eKCODE_BEGIN:${nonce}\x1f/work\x1eKCODE_END:${nonce}:0\x1f`);
+
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_RESULT', requestId: 'run', output: '/work' })));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('retires the Worker when a second VM_INIT arrives during the first boot', async () => {
+    // Break caught: racing startup requests must not create two v86 generations inside one native Worker.
     const postMessage = vi.fn();
     const close = vi.fn();
     vi.stubGlobal('self', { postMessage, close, onmessage: null });
@@ -128,19 +273,13 @@ describe('vm.worker lifecycle correlation', () => {
 
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'old', session } } as MessageEvent);
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'new', session } } as MessageEvent);
-    const [oldRuntime, newRuntime] = FakeRuntime.instances;
-    newRuntime.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    const [oldRuntime] = FakeRuntime.instances;
 
+    expect(FakeRuntime.instances).toHaveLength(1);
     expect(oldRuntime.destroyed).toBe(true);
-    expect(newRuntime.destroyed).toBe(false);
-    expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'new' });
-    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'old', kind: 'VM_ERROR' }));
-
-    newRuntime.emit('KCODE_AFTER_READY');
-    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_OUTPUT_DELTA', requestId: 'new' }));
-    expect(close).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'new', kind: 'VM_ERROR', code: 'VM_REINITIALIZATION_FORBIDDEN' }));
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'new', kind: 'VM_READY' }));
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('derives a transaction policy from the immutable approved session, never the request', async () => {
@@ -193,8 +332,8 @@ describe('vm.worker lifecycle correlation', () => {
     expect(postMessage).not.toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'attach' });
   });
 
-  it('does not attach a stale handle to a replacement runtime after identity verification yields', async () => {
-    // Break caught: an old attach continuation can read the global runtime after VM_INIT replacement and recover/mount its handle on the new VM.
+  it('does not attach a stale handle after a second VM_INIT retires the Worker', async () => {
+    // Break caught: an in-flight handle verification must not attach after the Worker has rejected a replacement session.
     class TestDirectoryHandle {}
     let finishVerification!: () => void;
     const verifyHandleBinding = vi.fn(() => new Promise<void>((resolve) => { finishVerification = resolve; }));
@@ -214,13 +353,11 @@ describe('vm.worker lifecycle correlation', () => {
     await vi.waitFor(() => expect(verifyHandleBinding).toHaveBeenCalledOnce());
 
     worker.onmessage?.({ data: { kind: 'VM_INIT', requestId: 'replacement-boot', session } } as MessageEvent);
-    const replacementRuntime = FakeRuntime.instances[1];
     finishVerification();
-    replacementRuntime.resolve();
-    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId: 'replacement-boot' }));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_ERROR', requestId: 'replacement-boot', code: 'VM_REINITIALIZATION_FORBIDDEN' })));
 
     expect(FakeRuntime.instances[0].attachedHandles).toEqual([]);
-    expect(replacementRuntime.attachedHandles).toEqual([]);
+    expect(FakeRuntime.instances).toHaveLength(1);
     expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ requestId: 'stale-attach' }));
   });
 

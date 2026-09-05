@@ -14,7 +14,12 @@
     "test:run": "vitest run",
     "test:e2e": "playwright test",
     "assets:sync": "node scripts/sync-v86-assets.mjs",
-    "assets:verify": "node scripts/verify-vm-assets.mjs"
+    "assets:verify": "node scripts/verify-vm-assets.mjs",
+    "security:source": "node scripts/security-source-scan.mjs",
+    "security:dist": "node scripts/security-source-scan.mjs dist/manifest.json",
+    "security:deps": "npm audit --audit-level=high",
+    "sbom": "node scripts/generate-sbom.mjs",
+    "verify": "npm run security:source && npm run security:deps && npm run typecheck && npm run test:run && npm run assets:verify && npm run build && npm run security:dist && npm run test:e2e && npm run sbom"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
@@ -24,6 +29,7 @@
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "2.7.1",
+    "@playwright/test": "1.62.1",
     "@testing-library/vue": "8.1.0",
     "@types/chrome": "0.2.8",
     "@types/node": "26.4.1",

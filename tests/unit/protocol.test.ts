@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  VM_MEMORY_PROFILES,
+  normalizeMemoryProfile,
   isAuthorizedVMRequest,
+  isContentCommand,
   isContentEvent,
   isSidePanelCommand,
   isVMEvent,
@@ -11,6 +14,35 @@ import { WorkspaceSessionAuthorizer } from '../../src/security/capabilities';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Chrome Port protocol guards', () => {
+  it('normalizes omitted VM memory to standard and admits only the closed profile union', () => {
+    // Break caught: a missing profile must not silently inherit an arbitrary RAM geometry or permit unbounded caller-selected memory.
+    expect(normalizeMemoryProfile(undefined)).toBe('standard');
+    expect(normalizeMemoryProfile('standard')).toBe('standard');
+    expect(normalizeMemoryProfile('high')).toBe('high');
+    expect(normalizeMemoryProfile('512')).toBeNull();
+    expect(VM_MEMORY_PROFILES).toEqual({ standard: 256 * 1024 * 1024, high: 512 * 1024 * 1024 });
+    expect(isVMRequest({
+      kind: 'VM_INIT',
+      requestId: 'req-1',
+      session: { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } },
+      memoryProfile: 'high',
+    })).toBe(true);
+    expect(isVMRequest({
+      kind: 'VM_INIT',
+      requestId: 'req-1',
+      session: { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } },
+      memoryProfile: 'unbounded',
+    })).toBe(false);
+  });
+
+  it('accepts only the exact authenticated content-abort command shape', () => {
+    // Break caught: a forged payload must not broaden the router-controlled cancellation signal.
+    expect(isContentCommand({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-1' })).toBe(true);
+    expect(isContentCommand({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-1', prompt: 'forged' })).toBe(false);
+    expect(isSidePanelCommand({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-1', targetTabId: 17 })).toBe(true);
+    expect(isSidePanelCommand({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'req-1', targetTabId: 18, prompt: 'forged' })).toBe(false);
+  });
+
   it('accepts only a bounded, exact side panel command shape', () => {
     expect(isSidePanelCommand({
       protocolVersion: 1,
@@ -152,5 +184,34 @@ describe('Chrome Port protocol guards', () => {
     expect(isVMRequest({ kind: 'VM_EXEC', requestId: 'req-1', command: 'pwd', timeoutMs: 600_001 })).toBe(false);
     expect(isVMEvent({ kind: 'VM_RESULT', requestId: 'req-1', output: 'ok', exitCode: 0, truncated: false, durationMs: 4, transactionId: 'tx_1', journalSummary: { transactionId: 'tx_1', state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 } })).toBe(true);
     expect(isVMEvent({ kind: 'VM_RESULT', requestId: 'req-1', output: 'ok', exitCode: 0 })).toBe(false);
+  });
+
+  it('validates confined file RPCs and enforces their immutable session capabilities', () => {
+    // Break caught: a file RPC that bypasses exact schemas or VM_INIT authority can read protected-sized data or mutate from a read-only session.
+    const read = { kind: 'VM_READ_FILE', requestId: 'read-1', path: 'src/main.ts', maxBytes: 1024 };
+    const write = { kind: 'VM_WRITE_FILE', requestId: 'write-1', path: 'notes.txt', content: 'ok' };
+    expect(isVMRequest(read)).toBe(true);
+    expect(isVMRequest(write)).toBe(true);
+    expect(isVMRequest({ ...read, maxBytes: 1_048_577 })).toBe(false);
+    expect(isVMRequest({ ...write, content: 'a'.repeat(1_048_577) })).toBe(false);
+    expect(isVMRequest({ ...read, shell: true })).toBe(false);
+
+    const authorizer = new WorkspaceSessionAuthorizer();
+    authorizer.activate({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } });
+    expect(isAuthorizedVMRequest(read, authorizer)).toBe(true);
+    expect(isAuthorizedVMRequest(write, authorizer)).toBe(false);
+    authorizer.activate({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['write'], network: { mode: 'offline' } });
+    expect(isAuthorizedVMRequest(read, authorizer)).toBe(false);
+    expect(isAuthorizedVMRequest(write, authorizer)).toBe(true);
+
+    expect(isVMEvent({ kind: 'VM_FILE_RESULT', requestId: 'read-1', text: 'file', truncated: false, durationMs: 1, transactionId: 'no_transaction', journalSummary: { transactionId: 'no_transaction', state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 } })).toBe(true);
+    expect(isVMEvent({ kind: 'VM_FILE_RESULT', requestId: 'read-1', text: 'a'.repeat(1_048_577), truncated: false, durationMs: 1, transactionId: 'no_transaction', journalSummary: { transactionId: 'no_transaction', state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 } })).toBe(false);
+  });
+
+  it('accepts a complete one MiB retained execution result but rejects a larger structured-clone payload', () => {
+    // Break caught: a result accepted by the execution controller must not be silently discarded by the VMClient protocol guard at 384 KiB.
+    const result = (output: string) => ({ kind: 'VM_RESULT' as const, requestId: 'req-1', output, exitCode: 0, truncated: false, durationMs: 4, transactionId: 'tx_1', journalSummary: { transactionId: 'tx_1', state: 'clean' as const, entries: [], journalBytes: 0, writtenBytes: 0 } });
+    expect(isVMEvent(result('a'.repeat(1024 * 1024)))).toBe(true);
+    expect(isVMEvent(result('a'.repeat(1024 * 1024 + 1)))).toBe(false);
   });
 });

@@ -5,8 +5,9 @@ import App from './App.vue';
 import { sidePanelServicesKey } from './App.vue';
 import { TabClient } from './tab-client';
 import { VMClient } from './vm-client';
+import { RelaySettingsStore } from './relay-settings';
 import './styles.css';
 
 const app = createApp(App);
-app.provide(sidePanelServicesKey, { workspace: new WorkspaceStore(), tab: new TabClient(), vm: new VMClient(), consent: new RiskConsentStore() });
+app.provide(sidePanelServicesKey, { workspace: new WorkspaceStore(), tab: new TabClient(), vm: new VMClient(), consent: new RiskConsentStore(), relaySettings: new RelaySettingsStore() });
 app.mount('#app');

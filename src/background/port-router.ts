@@ -90,6 +90,13 @@ export class PortRouter {
       this.tryPost(sidePanel, { protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: message.requestId, tabs });
       return;
     }
+    if (message.kind === 'CONTENT_ABORT_REQUEST') {
+      const pending = this.pending.get(message.requestId);
+      if (!pending || pending.sidePanel !== sidePanel || pending.targetTabId !== message.targetTabId) return;
+      this.pending.delete(message.requestId);
+      this.tryPost(pending.content, { protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: message.requestId });
+      return;
+    }
     const content = this.contents.get(message.targetTabId);
     if (!content) {
       this.postIdentityLost(sidePanel, message.requestId, message.targetTabId);
@@ -197,7 +204,14 @@ export class PortRouter {
   }
 
   private failRequest(requestId: string, pending: PendingRequest): void {
-    if (this.pending.get(requestId) === pending) this.pending.delete(requestId);
+    if (this.pending.get(requestId) === pending) {
+      this.pending.delete(requestId);
+      this.tryPost(pending.content, {
+        protocolVersion: 1,
+        kind: 'CONTENT_ABORT_REQUEST',
+        requestId,
+      });
+    }
     this.postIdentityLost(pending.sidePanel, requestId, pending.targetTabId);
   }
 
