@@ -1,0 +1,3 @@
+import { DeepSeekAdapter, type ChatSelectors } from './deepseek';
+export const chatGptSelectors: ChatSelectors = { composerRegion: ['form', '[data-chatgpt-composer]'], composer: ['#prompt-textarea', 'textarea[data-chatgpt-composer]', '[contenteditable="true"][role="textbox"]'], send: ['button[data-testid="send-button"]', 'button[data-chatgpt-send]', 'button[aria-label="Send"]'], assistantList: ['main'], assistant: ['[data-message-author-role="assistant"]'], stop: ['button[data-testid="stop-button"]', 'button[aria-label="Stop"]'] };
+export class ChatGptAdapter extends DeepSeekAdapter { constructor(document: Document = window.document) { super(document, chatGptSelectors); } }

@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "kcode",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage"],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://chat.qwen.ai/*",
+    "https://aistudio.google.com/*",
+    "https://chatgpt.com/*",
+    "https://hix.ai/*"
+  ],
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "action": {
+    "default_title": "Open kcode"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  },
+  "content_scripts": [
+    {
+    "matches": [
+      "https://chat.deepseek.com/*",
+      "https://chat.qwen.ai/*",
+      "https://aistudio.google.com/*",
+      "https://chatgpt.com/*",
+      "https://hix.ai/*"
+    ],
+      "js": ["src/content/content-script.ts"],
+      "run_at": "document_idle",
+      "all_frames": false,
+      "match_about_blank": false
+    }
+  ]
+}

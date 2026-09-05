@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "v86": {
+    "packageVersion": "0.5.458+gd96be77",
+    "revision": "d96be774e549a83371b038b86e819804c96b921f"
+  },
+  "alpine": {
+    "ociDigest": "sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753",
+    "apkLockSha256": "de8affbcf125def9e9794e3088a77375607c1300b0f40066396bcb71e08eb656"
+  },
+  "assets": {
+    "v86.wasm": "6121632f6d657d03f2286341ed87edcafd4945fa65ae765b4c7fd0bf2554a9c7",
+    "seabios.bin": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
+    "vgabios.bin": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880",
+    "vmlinuz-virt": "e7ccc63700a4699d2f3e9ffdd6f71c89c9af18cfb24b92e76972cb1763b7c065",
+    "kcode-initramfs": "27d7f9ad2b73f4060abe68d238160b0db03aabc60f23f854172611bb964a452e",
+    "alpine-state.bin.zst": "bad29491042ae276fd12427f85889fa770a2661b3fd1c6593490015423caed7b",
+    "kcode-rootfs.sqfs": "415e3ef3daffee0e6d411cdbd460c4d6e9032954024813053d2d52c4400dccbe"
+  },
+  "snapshot": {
+    "v86Version": "0.5.458+gd96be77",
+    "assetSetSha256": "fc56039ec7f3771597e3f1ef74af5902e8af5da7da01b27378545f958fe5ad8e"
+  }
+}

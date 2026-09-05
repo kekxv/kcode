@@ -1,0 +1,2 @@
+#!/bin/sh
+printf 'KCODE_GUEST_READY\n' >/dev/ttyS0

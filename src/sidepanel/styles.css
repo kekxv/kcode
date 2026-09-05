@@ -1,0 +1,20 @@
+:root { color: #e8edf2; background: #10151b; font-family: system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, textarea { font: inherit; }
+button { min-height: 2.25rem; }
+.side-panel { display: grid; grid-template-rows: auto 1fr auto; gap: .75rem; height: 100vh; padding: .75rem; }
+.status-bar { display: flex; flex-wrap: wrap; gap: .4rem .8rem; color: #b7c3cf; font-size: .82rem; }
+.workspace-controls, .network-settings, .agent-settings { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.network-settings small, .agent-settings small { flex-basis: 100%; overflow-wrap: anywhere; }
+.network-settings [role="alert"], .agent-settings [role="alert"] { color: #ff9d9d; }
+.agent-settings label { display: grid; gap: .25rem; flex: 1 1 20rem; }
+.agent-settings textarea { width: 100%; resize: vertical; }
+.panel-content { display: grid; grid-template-columns: 1fr; min-height: 0; gap: .75rem; }
+.chat-feed, .terminal-pane { min-height: 10rem; overflow: auto; border: 1px solid #34404d; border-radius: .35rem; padding: .5rem; }
+.terminal-pane { background: #050708; }
+.task-composer { display: grid; gap: .5rem; }
+.task-composer textarea { display: block; width: 100%; resize: vertical; }
+.risk-dialog, .auto-mode-status { border: 2px solid #db3b3b; background: #3b1111; padding: .75rem; }
+.risk-dialog label { display: block; margin: .5rem 0; }
+.auto-mode-status { color: #fff; }
