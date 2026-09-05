@@ -6,7 +6,7 @@ describe('chat adapter registry', () => {
   it.each([
     'https://chat.deepseek.com', 'https://chat.qwen.ai',
     'https://aistudio.google.com', 'https://chatgpt.com', 'https://hix.ai',
-    'https://gemini.google.com',
+    'https://gemini.google.com', 'https://www.easemate.ai',
   ])('creates an adapter only for the exact supported origin %s', (origin) => {
     expect(adapterForOrigin(origin, document)).not.toBeNull();
   });

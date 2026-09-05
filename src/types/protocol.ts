@@ -65,7 +65,7 @@ export type SidePanelAbortCommand = {
 };
 
 export type SidePanelCommand = SidePanelPromptCommand | SidePanelListTabsCommand | SidePanelAbortCommand;
-export type ChatProvider = 'DeepSeek' | 'Qwen' | 'Google AI Studio' | 'ChatGPT' | 'HIX.AI' | 'Gemini';
+export type ChatProvider = 'DeepSeek' | 'Qwen' | 'Google AI Studio' | 'ChatGPT' | 'HIX.AI' | 'Gemini' | 'EaseMate';
 export type SidePanelEvent = {
   protocolVersion: 1;
   kind: 'SIDE_PANEL_CONNECTED_TABS';
@@ -142,7 +142,8 @@ const hasExactKeys = (value: RecordValue, keys: readonly string[]): boolean => {
 
 const isId = (value: unknown): value is string => typeof value === 'string' && ID.test(value);
 const isChatProvider = (value: unknown): value is ChatProvider =>
-  value === 'DeepSeek' || value === 'Qwen' || value === 'Google AI Studio' || value === 'ChatGPT' || value === 'HIX.AI';
+  value === 'DeepSeek' || value === 'Qwen' || value === 'Google AI Studio' || value === 'ChatGPT'
+  || value === 'HIX.AI' || value === 'Gemini' || value === 'EaseMate';
 const isFiniteInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value);
 const bytesAtMost = (value: unknown, maximum: number): value is string =>

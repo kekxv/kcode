@@ -4,6 +4,7 @@ import { DeepSeekAdapter } from './deepseek';
 import { GoogleAiStudioAdapter } from './google-ai-studio';
 import { HixAdapter } from './hix';
 import { GeminiAdapter } from './gemini';
+import { EasemateAdapter } from './easemate';
 import { QwenAdapter } from './qwen';
 
 const adapterFactories: Readonly<Record<string, (document: Document) => SiteAdapter>> = {
@@ -13,6 +14,7 @@ const adapterFactories: Readonly<Record<string, (document: Document) => SiteAdap
   'https://chatgpt.com': (document) => new ChatGptAdapter(document),
   'https://hix.ai': (document) => new HixAdapter(document),
   'https://gemini.google.com': (document) => new GeminiAdapter(document),
+  'https://www.easemate.ai': (document) => new EasemateAdapter(document),
 };
 
 export const adapterForOrigin = (origin: string, document: Document = window.document): SiteAdapter | null =>

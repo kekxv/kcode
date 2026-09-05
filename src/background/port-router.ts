@@ -19,6 +19,7 @@ export const SUPPORTED_CHAT_ORIGINS = new Set([
   'https://chatgpt.com',
   'https://hix.ai',
   'https://gemini.google.com',
+  'https://www.easemate.ai',
 ]);
 
 const safeOrigin = (url: string | undefined): string | null => {
@@ -37,6 +38,7 @@ const providerForUrl = (url: string | undefined): ChatProvider | null => {
     case 'https://chatgpt.com': return 'ChatGPT';
     case 'https://hix.ai': return 'HIX.AI';
     case 'https://gemini.google.com': return 'Gemini';
+    case 'https://www.easemate.ai': return 'EaseMate';
     default: return null;
   }
 };

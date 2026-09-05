@@ -44,7 +44,7 @@ test('packages content scripts only for the supported chat origins', async () =>
   const expected = [
     'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*',
     'https://aistudio.google.com/*', 'https://chatgpt.com/*',
-    'https://hix.ai/*', 'https://gemini.google.com/*',
+    'https://hix.ai/*', 'https://gemini.google.com/*', 'https://www.easemate.ai/*',
   ];
   expect(manifest.host_permissions).toEqual(['<all_urls>']);
   expect(manifest.content_scripts[0]?.matches).toEqual(expected);

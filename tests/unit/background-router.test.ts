@@ -15,7 +15,7 @@ describe('PortRouter', () => {
   it('accepts only the explicit expanded chat origins', () => {
     expect(SUPPORTED_CHAT_ORIGINS).toEqual(new Set([
       'https://chat.deepseek.com', 'https://chat.qwen.ai', 'https://aistudio.google.com',
-      'https://chatgpt.com', 'https://hix.ai', 'https://gemini.google.com',
+      'https://chatgpt.com', 'https://hix.ai', 'https://gemini.google.com', 'https://www.easemate.ai',
     ]));
   });
   it('labels connected tabs from the trusted content-port origin', async () => {
