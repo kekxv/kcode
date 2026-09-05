@@ -54,15 +54,12 @@ const inspectEmbeddedRootfs = async (initramfsPath) => {
     const details = await stat(embeddedRootfs);
     if (!details.isFile()) throw new Error('embedded kcode-rootfs.sqfs is not a regular file');
     if (details.size > standardRootfsLimit) throw new Error(`embedded kcode-rootfs.sqfs exceeds the standard 256 MiB boot limit (${details.size} bytes > ${standardRootfsLimit} bytes)`);
-    const verified = join(staging, 'verified');
-    await mkdir(verified);
     await execFile('docker', [
-      'run', '--rm', '--platform', 'linux/386', ...(containerUser ? ['--user', containerUser] : []),
+      'run', '--rm', '--platform', 'linux/386',
       '--mount', `type=bind,src=${extraction},dst=/input,readonly`,
-      '--mount', `type=bind,src=${verified},dst=/output`,
       '--mount', `type=bind,src=${join(root, 'scripts')},dst=/scripts,readonly`,
       toolchainImage,
-      'sh', '-ec', 'unsquashfs -no-progress -d /output/rootfs /input/kcode-rootfs.sqfs >/dev/null && node /scripts/scan-vm-image.mjs /output/rootfs',
+      'sh', '-ec', 'mkdir -p /tmp/kcode-rootfs && unsquashfs -no-progress -d /tmp/kcode-rootfs /input/kcode-rootfs.sqfs >/dev/null && node /scripts/scan-vm-image.mjs /tmp/kcode-rootfs',
     ]);
     return sha256(await readFile(embeddedRootfs));
   } finally {
