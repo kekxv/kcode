@@ -27,11 +27,17 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Verify, test, scan, and package
         id: verify
-        run: npm run verify
+        run: |
+          set +e
+          npm run verify 2>&1 | tee verify.log
+          verify_status=${PIPESTATUS[0]}
+          echo "exit_code=$verify_status" >> "$GITHUB_OUTPUT"
+          exit "$verify_status"
       - name: Write workflow summary
         if: always()
         env:
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          VERIFY_EXIT_CODE: ${{ steps.verify.outputs.exit_code }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           PLAYWRIGHT_OUTCOME: ${{ steps.playwright.outcome }}
         run: |
@@ -41,7 +47,7 @@ jobs:
             if [ "$VERIFY_OUTCOME" = success ]; then
               echo '> ✅ Verification, security scans, build, and end-to-end tests passed.'
             else
-              echo '> ❌ Verification did not complete. Open the **Verify, test, scan, and package** step for the failing command.'
+              echo "> ❌ Verification failed with exit code \`$VERIFY_EXIT_CODE\`. The diagnostic excerpt below is taken from \`verify.log\`."
             fi
             echo
             echo '| Stage | Result |'
@@ -50,6 +56,24 @@ jobs:
             echo "| Playwright Chromium | $PLAYWRIGHT_OUTCOME |"
             echo "| Full verification | $VERIFY_OUTCOME |"
             echo
+            if [ "$VERIFY_OUTCOME" != success ]; then
+              echo '### Failure diagnosis'
+              if [ -s verify.log ]; then
+                echo '```text'
+                matches=$(grep -Ei '(^ FAIL |AssertionError|Error:|VM asset verification failed|security .*failed|Test Files|Tests .*failed|[0-9]+ failed)' verify.log | tail -n 80 || true)
+                if [ -n "$matches" ]; then
+                  printf '%s\n' "$matches"
+                else
+                  tail -n 80 verify.log
+                fi
+                echo '```'
+              else
+                echo '_`verify.log` was not created; inspect the Verify step output._'
+              fi
+              echo
+              echo 'The complete `verify.log` is attached as the **kcode-verify-log** artifact.'
+              echo
+            fi
             echo '### Build output'
             if [ -d dist ]; then
               echo '```text'
@@ -60,7 +84,16 @@ jobs:
               echo '_No `dist/` directory was produced._'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - name: Upload verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kcode-verify-log
+          path: verify.log
+          if-no-files-found: warn
+      - name: Upload extension package
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: kcode-extension
           path: dist/
