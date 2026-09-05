@@ -352,7 +352,7 @@ const setTheme = async (mode: ThemeMode): Promise<void> => { themeMode.value = a
     <ToolApproval v-if="pendingTool" :call="pendingTool.call" :workspace-name="workspace?.workspaceId ?? '未选择目录'" :network="networkMode === 'wisp' ? relayOrigin : 'offline'" @approve-tool="approveTool" @reject="rejectTool" />
     <ChangeReview v-if="pendingChanges" :summary="pendingChanges.execution.journalSummary" @accept="decideChanges('accept')" @rollback="decideChanges('rollback')" />
     <ResultRelease v-if="pendingRelease" :result="pendingRelease.result" @release="decideRelease(true)" @cancel="decideRelease(false)" />
-    <section class="panel-content"><section v-if="messages.length === 0" class="welcome"><h1>今天想完成什么？</h1><p>我会在需要时请求工具权限。</p><div><button @click="submit('了解 /work 中的项目结构')">了解项目结构</button><button @click="submit('实现一个功能并验证')">实现一个功能</button></div></section><ChatFeed :messages="messages" /><TerminalPane :chunks="terminalChunks" /></section>
+    <section class="panel-content"><section v-if="messages.length === 0" class="welcome"><h1>今天想完成什么？</h1><p>我会在需要时请求工具权限。</p><div><button @click="submit('了解 /work 中的项目结构')">了解项目结构</button><button @click="submit('实现一个功能并验证')">实现一个功能</button></div></section><ChatFeed :messages="messages" /><TerminalPane v-if="terminalChunks.length" :chunks="terminalChunks" /></section>
     <TaskComposer :disabled="!canSubmit" @submit="submit" @cancel="stopTask" />
   </main>
 </template>
