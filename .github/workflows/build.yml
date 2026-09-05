@@ -19,9 +19,47 @@ jobs:
         with:
           node-version: 22.12.0
           cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run verify
+      - name: Install dependencies
+        id: install
+        run: npm ci
+      - name: Install Chromium for end-to-end tests
+        id: playwright
+        run: npx playwright install --with-deps chromium
+      - name: Verify, test, scan, and package
+        id: verify
+        run: npm run verify
+      - name: Write workflow summary
+        if: always()
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          PLAYWRIGHT_OUTCOME: ${{ steps.playwright.outcome }}
+        run: |
+          {
+            echo '## kcode CI/CD summary'
+            echo
+            if [ "$VERIFY_OUTCOME" = success ]; then
+              echo '> ✅ Verification, security scans, build, and end-to-end tests passed.'
+            else
+              echo '> ❌ Verification did not complete. Open the **Verify, test, scan, and package** step for the failing command.'
+            fi
+            echo
+            echo '| Stage | Result |'
+            echo '| --- | --- |'
+            echo "| Dependency install | $INSTALL_OUTCOME |"
+            echo "| Playwright Chromium | $PLAYWRIGHT_OUTCOME |"
+            echo "| Full verification | $VERIFY_OUTCOME |"
+            echo
+            echo '### Build output'
+            if [ -d dist ]; then
+              echo '```text'
+              du -sh dist
+              find dist -maxdepth 2 -type f -printf '%p\n' | sort
+              echo '```'
+            else
+              echo '_No `dist/` directory was produced._'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: kcode-extension
