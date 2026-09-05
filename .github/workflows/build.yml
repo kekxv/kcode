@@ -62,11 +62,16 @@ jobs:
                 clean_log=$(mktemp)
                 sed -E $'s/\x1B\[[0-?]*[ -/]*[@-~]//g' verify.log > "$clean_log"
                 echo '```text'
-                matches=$(grep -Ei '(^ FAIL |AssertionError|Error:|VM asset verification failed|security .*failed|Test Files|Tests .*failed|[0-9]+ failed)' "$clean_log" | tail -n 80 || true)
-                if [ -n "$matches" ]; then
-                  printf '%s\n' "$matches"
+                asset_diagnostic=$(awk '/VM asset verification failed:/{remaining=24} remaining > 0 {print; remaining--}' "$clean_log")
+                if [ -n "$asset_diagnostic" ]; then
+                  printf '%s\n' "$asset_diagnostic"
                 else
-                  tail -n 80 "$clean_log"
+                  matches=$(grep -Ei '(^ FAIL |AssertionError|Error:|security .*failed|Test Files|Tests .*failed|[0-9]+ failed)' "$clean_log" | tail -n 80 || true)
+                  if [ -n "$matches" ]; then
+                    printf '%s\n' "$matches"
+                  else
+                    tail -n 80 "$clean_log"
+                  fi
                 fi
                 rm -f "$clean_log"
                 echo '```'
