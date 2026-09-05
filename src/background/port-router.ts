@@ -17,6 +17,7 @@ export const SUPPORTED_CHAT_ORIGINS = new Set([
   'https://chat.qwen.ai',
   'https://aistudio.google.com',
   'https://chatgpt.com',
+  'https://hix.ai',
 ]);
 
 const safeOrigin = (url: string | undefined): string | null => {
@@ -33,6 +34,7 @@ const providerForUrl = (url: string | undefined): ChatProvider | null => {
     case 'https://chat.qwen.ai': return 'Qwen';
     case 'https://aistudio.google.com': return 'Google AI Studio';
     case 'https://chatgpt.com': return 'ChatGPT';
+    case 'https://hix.ai': return 'HIX.AI';
     default: return null;
   }
 };

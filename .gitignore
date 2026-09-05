@@ -1,4 +1,5 @@
 .worktrees/
+.session/
 .superpowers/
 dist/
 node_modules/

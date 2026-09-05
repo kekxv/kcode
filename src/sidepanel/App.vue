@@ -7,6 +7,8 @@ import type { TabClient } from './tab-client';
 import type { VMClient } from './vm-client';
 import type { RelaySettingsStore } from './relay-settings';
 import type { AgentSettingsStore } from './agent-settings';
+import type { WorkspaceHistoryStore } from './workspace-history';
+import type { WorkRecord } from './work-history';
 export type SidePanelServices = {
   workspace: Pick<WorkspaceStore, 'load' | 'selectDirectory' | 'getPermission' | 'requestReadWrite'>;
   tab: Pick<TabClient, 'listConnectedTabs' | 'sendPrompt'>;
@@ -14,6 +16,7 @@ export type SidePanelServices = {
   consent: { grant(modes: readonly ('auto' | 'workspace-networked')[], context: ConsentContext): Promise<void>; hasValid(mode: 'auto' | 'workspace-networked', context: ConsentContext): Promise<boolean>; revokeAll(): Promise<void> };
   relaySettings: Pick<RelaySettingsStore, 'load' | 'save' | 'clear'>;
   agentSettings: Pick<AgentSettingsStore, 'load' | 'save' | 'clear'>;
+  workspaceHistory: Pick<WorkspaceHistoryStore, 'load' | 'append' | 'clear'>;
 };
 export const sidePanelServicesKey: InjectionKey<SidePanelServices> = Symbol('sidePanelServices');
 </script>
@@ -48,6 +51,7 @@ const networkMode = ref<'offline' | 'wisp'>('offline');
 const relayUrl = ref(''); const savedRelayUrl = ref<string | null>(null); const relayError = ref<string | null>(null); const activeRelayUrl = ref<string | null>(null); const autoRequested = ref(false); const networkRequested = ref(false); const showConsent = ref(false);
 const customInstructions = ref(''); const customInstructionsError = ref<string | null>(null);
 const messages = ref<string[]>([]); const terminalChunks = ref<string[]>([]); const busy = ref(false);
+const workHistory = ref<readonly WorkRecord[]>([]);
 const agentState = ref('idle');
 type ToolDecision = { call: ToolCall; finish: (authorization: ToolAuthorization | null) => void };
 type ChangeReviewDecision = { execution: ToolExecution; finish: (decision: ChangeDecision | null) => void };
@@ -67,6 +71,8 @@ const journalStatus = computed(() => pendingChanges.value?.execution.journalSumm
 const releaseStatus = computed(() => pendingRelease.value ? '等待发送批准' : '本地保留');
 const relayOrigin = computed(() => { try { return relayUrl.value ? new URL(relayUrl.value).origin : '离线'; } catch { return '无效中继'; } });
 const refreshWorkspace = async (): Promise<void> => { workspace.value = await services.workspace.load(); permission.value = workspace.value ? await services.workspace.getPermission() : 'unavailable'; };
+const refreshWorkHistory = async (): Promise<void> => { if (workspace.value) workHistory.value = await services.workspaceHistory.load(workspace.value.handle); };
+const clearWorkHistory = async (): Promise<void> => { if (!workspace.value) return; await services.workspaceHistory.clear(workspace.value.handle); workHistory.value = []; };
 const refreshTabs = async (): Promise<void> => { tabs.value = await services.tab.listConnectedTabs(); selectedTabId.value = tabs.value.length === 1 ? tabs.value[0].id : null; };
 const isCurrentAuthorityGeneration = (generation: number): boolean => generation === authorityGeneration;
 const stopAndRevoke = async (reason = 'USER_STOP'): Promise<number> => {
@@ -268,10 +274,17 @@ const submit = async (prompt: string): Promise<void> => {
   });
   if (outcome.text) messages.value.push(outcome.text);
   else if (outcome.code) messages.value.push(`任务结束：${outcome.code}`);
+  const selected = tabs.value.find((tab) => tab.id === selectedTabId.value);
+  try {
+    if (await services.workspace.requestReadWrite() === 'granted' && selected) {
+      await services.workspaceHistory.append(workspace.value.handle, { id: crypto.randomUUID(), createdAt: Date.now(), provider: selected.provider, task: prompt, outcome: outcome.text || outcome.code || '', status: outcome.code ? 'failed' : 'completed' });
+      await refreshWorkHistory();
+    }
+  } catch { /* A task result remains usable when optional local history cannot be written. */ }
   busy.value = false;
 };
 onMounted(() => {
-  void refreshWorkspace().catch(() => { permission.value = 'unavailable'; });
+  void refreshWorkspace().then(refreshWorkHistory).catch(() => { workHistory.value = []; });
   void refreshTabs().catch(() => { tabs.value = []; selectedTabId.value = null; });
   void services.relaySettings.load().then((saved) => { if (saved) { savedRelayUrl.value = saved; relayUrl.value = saved; } }).catch(() => { relayError.value = 'WISP relay URL 读取失败'; });
   void services.agentSettings.load().then((saved) => { customInstructions.value = saved; }).catch(() => { customInstructionsError.value = '自定义 Agent 指令读取失败'; });
@@ -283,6 +296,7 @@ onMounted(() => {
     <div class="workspace-controls"><button @click="chooseDirectory">选择工作目录</button><label>VM 内存<select :value="memoryProfile" @change="requestMemoryProfile"><option value="standard">标准（256 MiB）</option><option value="high">高内存（512 MiB）</option></select></label><label><input :checked="autoRequested" type="checkbox" @change="requestHighRiskMode($event, 'auto')">启用 Auto</label><label><input :checked="networkRequested" type="checkbox" @change="requestHighRiskMode($event, 'workspace-networked')">连接工作区网络</label><label v-if="tabs.length > 1">聊天页面<select v-model="selectedTabId"><option :value="null">请选择</option><option v-for="tab in tabs" :key="tab.id" :value="tab.id">{{ tab.provider }} 页面：{{ tab.title }}</option></select></label></div>
     <NetworkSettings v-model="relayUrl" :saved-url="savedRelayUrl" :error="relayError" @update:model-value="changeRelayUrl" @save="saveRelayUrl" @clear="clearRelayUrl" />
     <AgentSettings v-model="customInstructions" :error="customInstructionsError" @save="saveCustomInstructions" @clear="clearCustomInstructions" />
+    <section aria-label="工作记录"><button type="button" @click="clearWorkHistory">清除工作记录</button><p v-if="workHistory.length === 0">暂无工作记录</p><p v-for="record in workHistory" :key="record.id">{{ record.provider }} · {{ record.status }} · {{ record.task }} · {{ record.outcome }}</p></section>
     <section v-if="showMemoryProfileWarning" role="dialog" aria-label="高内存冷启动确认"><p>切换到 512 MiB 会冷重启虚拟机，丢失活动命令、工作区挂载、事务和网络状态，并增加浏览器内存占用。</p><button @click="confirmHighMemoryProfile">确认切换到 512 MiB</button><button @click="cancelMemoryProfileChange">取消</button></section>
     <AutoModeStatus :workspace-name="workspace?.workspaceId ?? '未选择目录'" :relay-origin="relayOrigin" :auto="executionMode === 'auto'" :network="networkMode === 'wisp'" @stop="stopTask" />
     <RiskConsentDialog v-if="showConsent" :auto="autoRequested" :network="networkRequested" @accept="acceptConsent" @cancel="rejectConsent" />

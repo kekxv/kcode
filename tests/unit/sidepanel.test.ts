@@ -26,6 +26,7 @@ const fakeServices = (ready = false): SidePanelServices => {
     consent: { grant: vi.fn(), hasValid: vi.fn().mockResolvedValue(false), revokeAll: vi.fn() },
     relaySettings: { load: vi.fn().mockResolvedValue(null), save: vi.fn(async (value: string) => value), clear: vi.fn() },
     agentSettings: { load: vi.fn().mockResolvedValue(''), save: vi.fn(async (value: string) => value), clear: vi.fn() },
+    workspaceHistory: { load: vi.fn().mockResolvedValue([]), append: vi.fn(), clear: vi.fn() },
   };
 };
 

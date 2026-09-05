@@ -8,7 +8,8 @@
     "https://chat.deepseek.com/*",
     "https://chat.qwen.ai/*",
     "https://aistudio.google.com/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://hix.ai/*"
   ],
   "background": {
     "service_worker": "src/background/index.ts",
@@ -29,7 +30,8 @@
       "https://chat.deepseek.com/*",
       "https://chat.qwen.ai/*",
       "https://aistudio.google.com/*",
-      "https://chatgpt.com/*"
+      "https://chatgpt.com/*",
+      "https://hix.ai/*"
     ],
       "js": ["src/content/content-script.ts"],
       "run_at": "document_idle",

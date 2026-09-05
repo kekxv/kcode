@@ -22,8 +22,10 @@
     "verify": "npm run security:source && npm run security:deps && npm run typecheck && npm run test:run && npm run assets:verify && npm run build && npm run security:dist && npm run test:e2e && npm run sbom"
   },
   "dependencies": {
+    "@types/sql.js": "^1.4.9",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
+    "sql.js": "^1.13.0",
     "v86": "0.5.458",
     "vue": "3.5.42"
   },

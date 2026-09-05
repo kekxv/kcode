@@ -7,8 +7,9 @@ import { TabClient } from './tab-client';
 import { VMClient } from './vm-client';
 import { RelaySettingsStore } from './relay-settings';
 import { AgentSettingsStore } from './agent-settings';
+import { WorkspaceHistoryStore } from './workspace-history';
 import './styles.css';
 
 const app = createApp(App);
-app.provide(sidePanelServicesKey, { workspace: new WorkspaceStore(), tab: new TabClient(), vm: new VMClient(), consent: new RiskConsentStore(), relaySettings: new RelaySettingsStore(), agentSettings: new AgentSettingsStore() });
+app.provide(sidePanelServicesKey, { workspace: new WorkspaceStore(), tab: new TabClient(), vm: new VMClient(), consent: new RiskConsentStore(), relaySettings: new RelaySettingsStore(), agentSettings: new AgentSettingsStore(), workspaceHistory: new WorkspaceHistoryStore() });
 app.mount('#app');

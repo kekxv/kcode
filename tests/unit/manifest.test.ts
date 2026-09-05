@@ -11,6 +11,7 @@ describe('manifest', () => {
       'https://chat.qwen.ai/*',
       'https://aistudio.google.com/*',
       'https://chatgpt.com/*',
+      'https://hix.ai/*',
     ]);
     expect(manifest.content_scripts[0].matches).toEqual(manifest.host_permissions);
     expect(manifest.content_scripts[0].js).toEqual(['src/content/content-script.ts']);
