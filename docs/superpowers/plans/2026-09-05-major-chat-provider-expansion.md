@@ -56,3 +56,7 @@ expect(matches).toEqual(expect.arrayContaining([
 - Every provider has matching type, origin, adapter, registry, test, and README entry.
 - No content script runs on an origin outside the nine supported chat sites.
 - Each new adapter fails instead of guessing when public DOM structure changes.
+
+## Implementation Note (2026-09-05)
+
+Gemini was implemented from a publicly observed `rich-textarea`, the exact `aria-label="Enter a prompt for Gemini"` editor, and its post-input `aria-label="Send message"` control. Claude and Perplexity returned Cloudflare challenge pages in the available browser environment, while Copilot exposed its composer but not a verifiable send control. They remain intentionally unsupported until their live chat DOM can be inspected; no guessed selectors were added.
