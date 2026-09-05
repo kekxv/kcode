@@ -84,6 +84,15 @@ describe('Side Panel shell', () => {
     expect(submit).toHaveProperty('disabled', true);
   });
 
+  it('keeps the task composer editable while setup is incomplete', async () => {
+    // Break caught: coupling the composer to send readiness makes normal text editing and IME composition unavailable before setup.
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
+    const task = await screen.findByRole('textbox', { name: '任务' });
+    expect(task).not.toHaveProperty('disabled', true);
+    await fireEvent.update(task, 'write hello.txt');
+    expect(task).toHaveProperty('value', 'write hello.txt');
+  });
+
   it('shows trusted relay settings independently of network consent state', async () => {
     // Break caught: the only relay configuration path is hidden behind enabling authority, so it cannot be validated and saved first.
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
