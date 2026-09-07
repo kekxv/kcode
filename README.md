@@ -4,6 +4,13 @@ kcode is a Chrome MV3 side-panel extension that lets a logged-in chat page reque
 
 [中文说明](README.zh-CN.md)
 
+## Example output
+
+The [`assets/`](assets/) folder holds an end-to-end demonstration produced with kcode: a modern, minimal Gomoku (五子棋) game that the page AI built on request, together with a screenshot taken once the task finished.
+
+- [`assets/index.html`](assets/index.html) — a self-contained Gomoku game. Open it directly in a browser to play against the built-in AI. It includes a wood-grain board, realistic pieces, move undo, an AI opening move, and per-browser win/streak statistics.
+- [`assets/SCR-20260907-jsyu.png`](assets/SCR-20260907-jsyu.png) — a screenshot of the kcode side panel next to Google AI Studio, showing the completed task and its reviewed result.
+
 ## Prerequisites
 
 - Node.js 22.12 or newer

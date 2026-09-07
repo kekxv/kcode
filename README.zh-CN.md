@@ -4,6 +4,13 @@ kcode 是一个 Chrome MV3 Side Panel 扩展：它让已登录的聊天网页在
 
 英文说明见 [README.md](README.md)。
 
+## 示例输出
+
+[`assets/`](assets/) 目录保存了一个用 kcode 端到端生成的示例：应要求让网页 AI 制作的一款现代极简五子棋游戏，以及任务完成后的面板截图。
+
+- [`assets/index.html`](assets/index.html) — 单文件五子棋游戏，浏览器直接打开即可与内置 AI 对弈。具备木质棋盘、拟物棋子、悔棋、电脑先手，以及按浏览器持久化的胜局与连胜统计。
+- [`assets/SCR-20260907-jsyu.png`](assets/SCR-20260907-jsyu.png) — kcode Side Panel 截图，旁边是 Google AI Studio，展示任务已完成与审阅结果。
+
 ## 前提条件
 
 - Node.js 22.12 或更高版本

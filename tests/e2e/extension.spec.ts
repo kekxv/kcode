@@ -24,11 +24,12 @@ test('loads the packaged extension and renders the safe initial side panel', asy
     await page.setViewportSize({ width: 400, height: 930 });
     await page.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
 
-    await expect(page.getByText('确认每步', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '执行模式' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '执行模式' })).toContainText('手动');
     await expect(page.getByRole('button', { name: '选择工作目录' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '今天想完成什么？' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '今天，一起做点什么？' })).toBeVisible();
     await expect(page.getByRole('textbox', { name: '任务' })).toBeVisible();
-    await expect(page.getByRole('region', { name: '安全终端' })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'VM Shell' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '开始任务' })).toBeDisabled();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.getByRole('button', { name: '会话设置' }).click();
