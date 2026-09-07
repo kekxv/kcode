@@ -13,7 +13,7 @@ type FileOperationResult = {
 };
 
 type DisposableVM = {
-  start(session: WorkspaceSession, memoryProfile?: MemoryProfile): Promise<void>;
+  start(session: WorkspaceSession, memoryProfile?: MemoryProfile, persistent?: boolean): Promise<void>;
   attachWorkspace(handle: FileSystemDirectoryHandle): Promise<void>;
   beginTransaction(transactionId: string): Promise<void>;
   exec(command: string, options: { timeoutMs: number }): Promise<{ output: string; exitCode: number; truncated: boolean; durationMs: number; transactionId: string; journalSummary: JournalSummary }>;
@@ -49,13 +49,26 @@ export class ToolDispatcher {
     private readonly vm: DisposableVM,
     private readonly workspace: WorkspaceProvider,
     private readonly authorizeNetwork: NetworkAuthorizer = async () => false,
+    private readonly persistent = false,
   ) {}
 
   async execute(call: ToolCall, authorization: ToolAuthorization, signal: AbortSignal): Promise<ToolExecution> {
-    if (this.active) return failure('TOOL_DISPATCH_BUSY');
-    if (signal.aborted) return failure(abortCode(signal));
     const expected = authorizationForTool(call, authorization.source);
     if (!sameCapabilities(authorization.capabilities, expected.capabilities)) return failure('TOOL_AUTHORIZATION_INVALID');
+    return this.perform(call, authorization, signal);
+  }
+
+  /** Only the user-operated console calls this; model tools retain exact capability matching. */
+  executeManualShell(command: string, signal: AbortSignal, size?: { cols: number; rows: number }): Promise<ToolExecution> {
+    const cols = Math.max(20, Math.min(500, Math.floor(size?.cols || 80)));
+    const rows = Math.max(5, Math.min(200, Math.floor(size?.rows || 24)));
+    const call: ToolCall = { id: `shell_${crypto.randomUUID().replaceAll('-', '_')}`, tool: 'bash', args: { cmd: `stty cols ${cols} rows ${rows}; export TERM=xterm-256color; ${command}`, workspace: 'delete', timeoutMs: 600_000 } };
+    return this.perform(call, { source: 'interactive', capabilities: ['read', 'write', 'delete'] }, signal);
+  }
+
+  private async perform(call: ToolCall, authorization: ToolAuthorization, signal: AbortSignal): Promise<ToolExecution> {
+    if (this.active) return failure('TOOL_DISPATCH_BUSY');
+    if (signal.aborted) return failure(abortCode(signal));
 
     const selected = await this.workspace();
     if (signal.aborted) return failure(abortCode(signal));
@@ -65,11 +78,11 @@ export class ToolDispatcher {
       selected.network = { mode: 'wisp', relayUrl };
       if (signal.aborted) return failure(abortCode(signal));
     }
-    const mutating = expected.capabilities[0] !== 'read';
+    const mutating = authorization.capabilities.some(capability => capability !== 'read');
     const transactionId = mutating ? `tx_${crypto.randomUUID().replaceAll('-', '_')}` : 'no_transaction';
     const active: ActiveTransaction = { transactionId, finalizing: false };
     if (mutating) this.active = active;
-    const onAbort = (): void => { void this.abort(abortCode(signal)); };
+    const onAbort = (): void => { void this.abort(abortCode(signal)).catch(() => undefined); };
     signal.addEventListener('abort', onAbort, { once: true });
     try {
       await this.vm.start({
@@ -77,7 +90,7 @@ export class ToolDispatcher {
         workspaceId: selected.workspaceId,
         capabilities: authorization.capabilities,
         network: selected.network,
-      }, selected.memoryProfile);
+      }, selected.memoryProfile, ...(this.persistent ? [true] as const : []));
       if (signal.aborted) return failure(abortCode(signal));
       await this.vm.attachWorkspace(selected.handle);
       if (signal.aborted) return failure(abortCode(signal));
@@ -88,7 +101,7 @@ export class ToolDispatcher {
 
       if (call.tool === 'bash' || call.tool === 'fetch') {
         const command = call.tool === 'bash'
-          ? `cd /work && ${call.args.cmd}`
+          ? this.persistent ? call.args.cmd : `cd /work && ${call.args.cmd}`
           : `curl --fail --location --max-time 120 --max-filesize ${call.args.maxBytes ?? 1_048_576} -- ${JSON.stringify(call.args.url)}`;
         const result = await this.vm.exec(command, { timeoutMs: call.tool === 'bash' ? call.args.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS : DEFAULT_COMMAND_TIMEOUT_MS });
         if (result.transactionId !== transactionId) return failure('TOOL_TRANSACTION_MISMATCH');
@@ -99,7 +112,24 @@ export class ToolDispatcher {
         };
       }
       const startedAt = performance.now();
-      const result = call.tool === 'read_file'
+      let editResult: FileOperationResult | undefined;
+      if (call.tool === 'edit_file') {
+        const original = await this.vm.readFile(call.args.path, 1_048_576);
+        if (signal.aborted) return failure(abortCode(signal));
+        if (original.transactionId !== transactionId) return failure('TOOL_TRANSACTION_MISMATCH');
+        if (original.truncated) return failure('EDIT_FILE_TOO_LARGE');
+        if (!call.args.old_string.length) return failure('EDIT_EMPTY_MATCH');
+        const first = original.text.indexOf(call.args.old_string);
+        if (first < 0) return failure('EDIT_TEXT_NOT_FOUND');
+        if (!call.args.replace_all && original.text.indexOf(call.args.old_string, first + 1) >= 0) return failure('EDIT_MATCH_NOT_UNIQUE');
+        const parts = original.text.split(call.args.old_string);
+        const content = call.args.replace_all ? parts.join(call.args.new_string)
+          : original.text.slice(0, first) + call.args.new_string + original.text.slice(first + call.args.old_string.length);
+        if (new TextEncoder().encode(content).byteLength > 1_048_576) return failure('EDIT_FILE_TOO_LARGE');
+        editResult = await this.vm.writeFile(call.args.path, content);
+        editResult = { ...editResult, text: 'Replaced ' + (call.args.replace_all ? parts.length - 1 : 1) + ' occurrence(s).' };
+      }
+      const result = call.tool === 'edit_file' ? editResult! : call.tool === 'read_file'
         ? await this.vm.readFile(call.args.path, call.args.maxBytes)
         : await this.vm.writeFile(call.args.path, call.args.content);
       if (result.transactionId !== transactionId) return failure('TOOL_TRANSACTION_MISMATCH');

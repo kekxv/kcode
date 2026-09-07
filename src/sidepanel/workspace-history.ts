@@ -13,15 +13,16 @@ export type RecoveryCheckpoint = {
 
 /** SQLite work history confined to the selected workspace's .session directory. */
 export class WorkspaceHistoryStore {
-  private sql?: Awaited<ReturnType<typeof initSqlJs>>;
+  private sql?: ReturnType<typeof initSqlJs>;
   private async database(root: FileSystemDirectoryHandle, create: boolean) {
-    const SQL = this.sql ??= await initSqlJs();
+    const SQL = await (this.sql ??= initSqlJs().catch(error => { this.sql = undefined; throw error; }));
     const directory = await root.getDirectoryHandle(DIRECTORY, { create });
     const file = await directory.getFileHandle(FILE, { create });
     const bytes = new Uint8Array(await (await file.getFile()).arrayBuffer());
     const db = new SQL.Database(bytes.byteLength ? bytes : undefined);
     if (create) {
       db.run('CREATE TABLE IF NOT EXISTS work_history (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, provider TEXT NOT NULL, task TEXT NOT NULL, outcome TEXT NOT NULL, status TEXT NOT NULL)');
+      db.run('CREATE TABLE IF NOT EXISTS work_transcripts (id TEXT PRIMARY KEY, messages TEXT NOT NULL)');
       db.run("CREATE TABLE IF NOT EXISTS recovery_state (slot INTEGER PRIMARY KEY CHECK(slot = 1), updated_at INTEGER NOT NULL, provider TEXT NOT NULL, task TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('running', 'completed', 'failed', 'cancelled')), summary TEXT NOT NULL)");
     }
     return { db, file };
@@ -37,7 +38,7 @@ export class WorkspaceHistoryStore {
   }
   async append(root: FileSystemDirectoryHandle, record: WorkRecord): Promise<void> {
     const { db, file } = await this.database(root, true);
-    try { db.run('INSERT OR REPLACE INTO work_history VALUES (?, ?, ?, ?, ?, ?)', [record.id, record.createdAt, record.provider, record.task, record.outcome, record.status]); await this.persist(db, file); } catch (error) { db.close(); throw error; }
+    try { db.run('INSERT OR REPLACE INTO work_history VALUES (?, ?, ?, ?, ?, ?)', [record.id, record.createdAt, record.provider, record.task, record.outcome, record.status]); if (record.messages) db.run('INSERT OR REPLACE INTO work_transcripts (id, messages) VALUES (?, ?)', [record.id, JSON.stringify(record.messages)]); await this.persist(db, file); } catch (error) { db.close(); throw error; }
   }
   async load(root: FileSystemDirectoryHandle): Promise<readonly WorkRecord[]> {
     let database: { db: InstanceType<Awaited<ReturnType<typeof initSqlJs>>['Database']> };
@@ -48,7 +49,11 @@ export class WorkspaceHistoryStore {
     try {
       const result = database.db.exec('SELECT id, created_at, provider, task, outcome, status FROM work_history ORDER BY created_at DESC');
       const rows = result[0]?.values ?? [];
-      return rows.map(([id, createdAt, provider, task, outcome, status]) => ({ id: String(id), createdAt: Number(createdAt), provider: provider as WorkRecord['provider'], task: String(task), outcome: String(outcome), status: status as WorkRecord['status'] }));
+      const transcripts = new Map<string, WorkRecord['messages']>();
+      if (database.db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='work_transcripts'")[0]?.values.length) {
+        for (const [id, messages] of database.db.exec('SELECT id, messages FROM work_transcripts')[0]?.values ?? []) transcripts.set(String(id), JSON.parse(String(messages)));
+      }
+      return rows.map(([id, createdAt, provider, task, outcome, status]) => ({ id: String(id), createdAt: Number(createdAt), provider: provider as WorkRecord['provider'], task: String(task), outcome: String(outcome), status: status as WorkRecord['status'], ...(transcripts.has(String(id)) ? { messages: transcripts.get(String(id)) } : {}) }));
     } finally { database.db.close(); }
   }
   async clear(root: FileSystemDirectoryHandle): Promise<void> { const directory = await root.getDirectoryHandle(DIRECTORY, { create: true }); await directory.removeEntry(FILE).catch((error: unknown) => { if (!(error instanceof DOMException) || error.name !== 'NotFoundError') throw error; }); }

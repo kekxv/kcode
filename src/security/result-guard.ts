@@ -70,7 +70,7 @@ export const escapeToolResult = (value: string): string => visualizeControls(wel
 export class DefaultResultGuard {
   scan(text: string): readonly Match[] { return nonOverlapping([...directMatches(text), ...base64Matches(text)]); }
 
-  redact(result: LocalToolResult): GuardedResult {
+  redact(result: LocalToolResult, maximumBytes = RELEASE_BYTES): GuardedResult {
     const matches = this.scan(result.text);
     let cursor = 0;
     let redacted = '';
@@ -83,7 +83,7 @@ export class DefaultResultGuard {
     }
     redacted += result.text.slice(cursor);
     redacted = visualizeControls(wellFormed(redacted));
-    const bounded = truncateUtf8(redacted, RELEASE_BYTES);
+    const bounded = truncateUtf8(redacted, maximumBytes);
     return {
       redactedText: bounded.text,
       findings: [...counts].map(([kind, count]) => ({ kind, count })),

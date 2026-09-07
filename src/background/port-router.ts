@@ -59,7 +59,7 @@ export const isTrustedDeepSeekSender = isTrustedChatSender;
 
 type RouterDependencies = {
   tabs: Pick<typeof chrome.tabs, 'get'>;
-  runtime?: Pick<typeof chrome.runtime, 'onConnect'>;
+  runtime?: Pick<typeof chrome.runtime, 'onConnect'> & Partial<Pick<typeof chrome.runtime, 'onMessage'>>;
 };
 
 type PendingRequest = {
@@ -88,6 +88,12 @@ export class PortRouter {
   register(): void {
     const runtime = this.dependencies.runtime ?? chrome.runtime;
     runtime.onConnect.addListener((port) => this.connect(port));
+    runtime.onMessage?.addListener((message, sender, respond) => {
+      if (!isTrustedSidePanelSender(sender) || !isSidePanelCommand(message)
+        || message.kind !== 'SIDE_PANEL_LIST_CONNECTED_TABS') return false;
+      respond({ protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: message.requestId, tabs: this.connectedTabs() });
+      return false;
+    });
   }
 
   /** Used by the authenticated onConnect boundary and integration tests. */
@@ -106,16 +112,20 @@ export class PortRouter {
     this.contents.set(tabId, port);
   }
 
-  async fromSidePanel(message: unknown): Promise<void> {
-    if (!isSidePanelCommand(message) || !this.sidePanel) return;
-    const sidePanel = this.sidePanel;
-    if (message.kind === 'SIDE_PANEL_LIST_CONNECTED_TABS') {
-      const tabs: SidePanelEvent['tabs'] = [...this.contents.entries()]
+  private connectedTabs(): SidePanelEvent['tabs'] {
+    return [...this.contents.entries()]
         .flatMap(([tabId, port]) => {
           const provider = providerForUrl(port.sender?.url);
           return provider ? [{ tabId, title: port.sender?.tab?.title ?? provider, provider }] : [];
         })
         .sort((left, right) => left.tabId - right.tabId);
+  }
+
+  async fromSidePanel(message: unknown): Promise<void> {
+    if (!isSidePanelCommand(message) || !this.sidePanel) return;
+    const sidePanel = this.sidePanel;
+    if (message.kind === 'SIDE_PANEL_LIST_CONNECTED_TABS') {
+      const tabs = this.connectedTabs();
       this.tryPost(sidePanel, { protocolVersion: 1, kind: 'SIDE_PANEL_CONNECTED_TABS', requestId: message.requestId, tabs });
       return;
     }
@@ -149,6 +159,7 @@ export class PortRouter {
       kind: 'CONTENT_SEND_PROMPT',
       requestId: message.requestId,
       prompt: message.prompt,
+      ...(message.images?.length ? { images: message.images } : {}),
     };
     this.pending.set(message.requestId, { sidePanel, content, targetTabId: message.targetTabId });
     if (!this.tryPost(content, command)) {

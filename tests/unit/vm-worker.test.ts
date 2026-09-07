@@ -64,6 +64,36 @@ afterEach(() => {
 });
 
 describe('vm.worker lifecycle correlation', () => {
+  it('keeps a persistent runtime after commit, emits integer file duration, and rejects unapproved later writes', async () => {
+    class TestDirectoryHandle {}
+    const postMessage = vi.fn(); const close = vi.fn();
+    vi.stubGlobal('self', { postMessage, close, onmessage: null });
+    vi.stubGlobal('FileSystemDirectoryHandle', TestDirectoryHandle);
+    vi.doMock('../../src/utils/idb-store', () => ({ WorkspaceStore: class { async verifyHandleBinding(): Promise<void> {} } }));
+    vi.doMock('../../src/worker/v86-runtime', () => ({ V86Runtime: FakeRuntime }));
+    await import('../../src/worker/vm.worker');
+    const send = (data: unknown) => self.onmessage?.({ data } as MessageEvent);
+    const ready = async (requestId: string) => vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith({ kind: 'VM_READY', requestId }));
+    send({ kind: 'VM_INIT', requestId: 'boot', session: { ...session, capabilities: ['read', 'write'] }, persistent: true });
+    const runtime = FakeRuntime.instances[0]; runtime.resolve(); await ready('boot');
+    send({ kind: 'VM_ATTACH_WORKSPACE', requestId: 'attach', handle: new TestDirectoryHandle() }); await ready('attach');
+    send({ kind: 'VM_BEGIN_TRANSACTION', requestId: 'begin', transactionId: 'tx_write' }); await ready('begin');
+    send({ kind: 'VM_UPDATE_SESSION', requestId: 'busy_update', session });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'busy_update', code: 'VM_SESSION_UPDATE_FORBIDDEN' }));
+    send({ kind: 'VM_WRITE_FILE', requestId: 'write', path: 'index.html', content: 'demo' });
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ kind: 'VM_FILE_RESULT', requestId: 'write' })));
+    const result = postMessage.mock.calls.find(([event]) => event.kind === 'VM_FILE_RESULT')![0];
+    expect(Number.isInteger(result.durationMs)).toBe(true);
+    send({ kind: 'VM_COMMIT_TRANSACTION', requestId: 'commit' }); await ready('commit');
+    send({ kind: 'VM_UPDATE_SESSION', requestId: 'update', session }); await ready('update');
+    send({ kind: 'VM_WRITE_FILE', requestId: 'denied', path: 'index.html', content: 'changed' });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'denied', code: 'VM_UNAUTHORIZED_REQUEST' }));
+    send({ kind: 'VM_UPDATE_SESSION', requestId: 'wrong_workspace', session: { ...session, workspaceId: 'different' } });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'wrong_workspace', code: 'VM_SESSION_UPDATE_FORBIDDEN' }));
+    expect(FakeRuntime.instances).toHaveLength(1);
+    expect(runtime.destroyed).toBe(false); expect(close).not.toHaveBeenCalled();
+  });
+
   it('cold-boots workspace sessions without any reusable snapshot state', async () => {
     // Break caught: restoring a prior machine state before an attach can
     // preserve stale 9P topology and run the mount before a live shell.

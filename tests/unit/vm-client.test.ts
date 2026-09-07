@@ -16,6 +16,80 @@ class FakeWorker {
 }
 
 describe('VMClient', () => {
+  it('routes stdin only to a live persistent execution and keeps input acknowledgements separate', async () => {
+    const worker = new FakeWorker();
+    const client = new VMClient(() => worker as unknown as Worker);
+    await expect(client.sendInput('x')).rejects.toThrow('VM_STDIN_NOT_READY');
+    const boot = client.start({ mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read'], network: { mode: 'offline' } }, 'standard', true);
+    worker.emit({ kind: 'VM_READY', requestId: (worker.posted.at(-1) as any).requestId });
+    await boot;
+    const execution = client.exec('read answer', { timeoutMs: 30000 });
+    const requestId = (worker.posted.at(-1) as any).requestId;
+    let finished = false;
+    void execution.then(() => { finished = true; });
+    await expect(client.sendInput('你'.repeat(3000))).rejects.toThrow('VM_STDIN_TOO_LARGE');
+    const input = client.sendInput('hello\r');
+    expect(worker.posted.at(-1)).toMatchObject({ kind: 'VM_STDIN', targetRequestId: requestId, data: 'hello\r' });
+    worker.emit({ kind: 'VM_READY', requestId: (worker.posted.at(-1) as any).requestId });
+    await input;
+    expect(finished).toBe(false);
+    worker.emit({ kind: 'VM_RESULT', requestId, output: 'hello', exitCode: 0, truncated: false, durationMs: 1, transactionId: 'no_transaction', journalSummary: { transactionId: 'no_transaction', state: 'clean', entries: [], journalBytes: 0, writtenBytes: 0 } });
+    await execution;
+    await expect(client.sendInput('later')).rejects.toThrow('VM_STDIN_NOT_READY');
+    client.dispose();
+  });
+
+
+  it('rejects malformed correlated file results instead of hanging', async () => {
+    const worker = new FakeWorker();
+    const client = new VMClient(() => worker as unknown as Worker);
+    const pending = client.writeFile('index.html', 'hello');
+    const request = worker.posted[0] as { requestId: string };
+    worker.emit({ kind: 'VM_FILE_RESULT', requestId: request.requestId, durationMs: 0.25 });
+    await expect(pending).rejects.toThrow('VM_PROTOCOL_ERROR');
+    expect(worker.terminated).toBe(true);
+  });
+
+  it('bounds a missing file response', async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker();
+      const client = new VMClient(() => worker as unknown as Worker);
+      const pending = client.writeFile('index.html', 'hello');
+      const assertion = expect(pending).rejects.toThrow('VM_REQUEST_TIMEOUT');
+      await vi.advanceTimersByTimeAsync(60000);
+      await assertion;
+      expect(worker.terminated).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reuses a persistent Worker and mount after file commit and updates authority between operations', async () => {
+    const worker = new FakeWorker();
+    const factory = vi.fn(() => worker as unknown as Worker);
+    const client = new VMClient(factory);
+    const session = { mode: 'workspace', workspaceId: 'workspace-1', capabilities: ['read', 'write'], network: { mode: 'offline' } } as const;
+    const ready = async (pending: Promise<void>) => {
+      const request = worker.posted.at(-1) as { requestId: string };
+      worker.emit({ kind: 'VM_READY', requestId: request.requestId }); await pending;
+    };
+    await ready(client.start(session, 'standard', true));
+    const handle = {} as FileSystemDirectoryHandle;
+    await ready(client.attachWorkspace(handle));
+    await ready(client.beginTransaction('tx_file'));
+    const pending = client.writeFile('index.html', 'hello');
+    const request = worker.posted.at(-1) as { requestId: string };
+    worker.emit({ kind: 'VM_FILE_RESULT', requestId: request.requestId, text: '', truncated: false, durationMs: 1, transactionId: 'tx_file', journalSummary: { transactionId: 'tx_file', state: 'dirty', entries: [], journalBytes: 1, writtenBytes: 5 } });
+    await pending;
+    await ready(client.commitTransaction());
+    await ready(client.start({ ...session, capabilities: ['read'] }, 'standard', true));
+    expect(worker.posted.at(-1)).toMatchObject({ kind: 'VM_UPDATE_SESSION', session: { capabilities: ['read'] } });
+    await client.attachWorkspace(handle);
+    expect(worker.posted.filter((item: any) => item.kind === 'VM_ATTACH_WORKSPACE')).toHaveLength(1);
+    expect(factory).toHaveBeenCalledOnce();
+    expect(worker.terminated).toBe(false);
+    client.dispose();
+  });
+
   it('native-terminates the old generation before a high-memory cold boot', async () => {
     // Break caught: keeping a Worker, cloned handle, or pending request across a RAM-profile change can restore state from a different VM geometry.
     const standardWorker = new FakeWorker();

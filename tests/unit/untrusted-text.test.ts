@@ -63,3 +63,17 @@ describe('TerminalManager', () => {
     vi.useRealTimers();
   });
 });
+
+describe('interactive terminal controls', () => {
+  it('retains split cursor and alternate-screen controls for full-screen programs', () => {
+    const sanitizer = new TerminalChunkSanitizer(true);
+    expect(sanitizer.write('\x1b[?104')).toBe('');
+    expect(sanitizer.write('9h\x1b[2;1H~\x1b[K\b\t')).toBe('\x1b[?1049h\x1b[2;1H~\x1b[K\b\t');
+    expect(sanitizer.write('\x1b[?1049l')).toBe('\x1b[?1049l');
+  });
+  it('still strips clipboard, titles and device control payloads', () => {
+    const sanitizer = new TerminalChunkSanitizer(true);
+    expect(sanitizer.write('a\x1b]52;c;secret')).toBe('a');
+    expect(sanitizer.write('\x07b\x1bPpayload\x1b\\c\x1b]0;title\x07')).toBe('bc');
+  });
+});

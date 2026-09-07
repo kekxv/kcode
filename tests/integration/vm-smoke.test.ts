@@ -65,6 +65,25 @@ const guestReadyMarker = (): string => {
 };
 
 describe('V86Runtime', () => {
+
+  it('does not let stalled snapshot storage block a ready shell', async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new V86Runtime({
+        V86: FakeV86 as unknown as typeof import('v86').V86,
+        assetUrl: name => name,
+        snapshots: { load: async () => null, save: () => new Promise<void>(() => {}) },
+      });
+      const boot = runtime.boot();
+      await Promise.resolve(); await Promise.resolve();
+      FakeV86.latest?.emit('emulator-loaded');
+      FakeV86.latest?.emitSerial(guestReadyMarker() + '\n');
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(boot).resolves.toBeUndefined();
+      runtime.destroy();
+    } finally { FakeV86.latest = undefined; vi.useRealTimers(); }
+  });
+
   it('creates an offline user snapshot after the first ready boot and restores it only for the same memory profile', async () => {
     // Break caught: shipping a snapshot bloats the extension, while treating a
     // 256 MiB state as a 512 MiB state can corrupt the restored VM.

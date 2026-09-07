@@ -1,6 +1,6 @@
 # kcode 中文说明
 
-kcode 是一个 Chrome MV3 Side Panel 扩展：它让已登录的聊天网页在一次性 v86 Alpine VM 中请求受限工具。用户选定的目录只会通过 9P 挂载到 `/work`；每次工具调用后 VM 都会销毁。AI 只能使用明确的工具调用操作用户选定目录，高风险能力始终需要用户确认。
+kcode 是一个 Chrome MV3 Side Panel 扩展：它让已登录的聊天网页在持续运行的 v86 Alpine VM 中请求受限工具。用户选定的目录只会通过 9P 挂载到 `/work`；同一工作目录、网络和内存配置下，连续工具调用复用 VM，保留 Shell 工作目录与环境变量；停止、超时或配置变化会销毁 VM。AI 只能使用明确的工具调用操作用户选定目录，自动执行由用户选择执行模式授权，联网仍需单独确认。
 
 英文说明见 [README.md](README.md)。
 
@@ -51,7 +51,8 @@ npm run assets:rebuild
 ## 权限与数据
 
 - 默认 `confirm-each`：每次工具、文件变更和结果发送都需要确认。
-- Auto 和 WISP 网络各自需要高风险确认；停止会撤销会话授权。
+- 顶部可切换「手动 / 自动写入 / 全自动」。自动写入会自动执行文件读写、提交变更并发送脱敏结果，Shell 仍需批准；全自动跳过这些逐步批准。选择自动模式即为当前工作目录授予会话权限，停止会撤销授权。
+- WISP 网络仍需单独确认。
 - 内容脚本只在上述聊天站点运行。较宽的主机访问权限仅服务于已批准的网络工具，不用于控制其他网页。
 - 工作记录与任务恢复断点经过脱敏后存入用户选择目录的 `.session/kcode-history.sqlite`。
 
@@ -65,7 +66,7 @@ WISP 会按照中继策略，为 VM 提供常见 DNS/HTTPS/Git/NPM 流程所需�
 
 扩展不运营公共中继。请使用你本人或团队运行的中继，例如 `wss://relay.example.com/wisp`。小型 Docker 部署可使用 `deploy/wisp/` 中的受限模板：它只允许到 80、443、9418、22 端口的出站 TCP，拒绝直接 IP、私有和回环目标，禁用 UDP 并限制并发流。普通 Cloudflare HTTP 代理 URL 不是 WISP 端点；Cloudflare 是否可承载兼容中继取决于账户的 Worker/Sockets 和出站策略。
 
-Agent 可以请求 HTTPS `fetch` 工具调用。它会在一次性 VM 内以有界 `curl` 命令运行，要求已启用 WISP 网络和既有风险确认；在 `confirm-each` 模式下同样会显示审批。它不是不受限制的浏览器页面 fetch 桥接。
+Agent 可以请求 HTTPS `fetch` 工具调用。它会在持续运行的 VM 内以有界 `curl` 命令运行，要求已启用 WISP 网络和既有风险确认；在 `confirm-each` 模式下同样会显示审批。它不是不受限制的浏览器页面 fetch 桥接。
 
 ## 工作记录与重启恢复
 

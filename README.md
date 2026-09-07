@@ -1,6 +1,6 @@
 # kcode
 
-kcode is a Chrome MV3 side-panel extension that lets a logged-in chat page request bounded tools in a disposable v86 Alpine VM. It supports DeepSeek, Qwen, Google AI Studio, ChatGPT, and HIX.AI. The selected directory is mounted only at `/work` through 9P; every VM is destroyed after one tool call.
+kcode is a Chrome MV3 side-panel extension that lets a logged-in chat page request bounded tools in a persistent v86 Alpine VM. It supports DeepSeek, Qwen, Google AI Studio, ChatGPT, and HIX.AI. The selected directory is mounted only at `/work` through 9P; the side panel reuses the VM and shell cwd/environment between tools in the same workspace and network configuration. Stop, timeout, or a workspace/network/memory change destroys the VM.
 
 [中文说明](README.zh-CN.md)
 
@@ -48,7 +48,7 @@ Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, the
 
 The extension requests broad host access so its approved network tools can work across sites, but content scripts still run only on the listed chat sites. The extension does not set or modify a provider-native system prompt. Its optional custom Agent instructions are appended to the first kcode-controlled ordinary user message, after the fixed safety policy, so they cannot weaken workspace, approval, or network controls. Provider UI changes or ambiguous page controls stop the request with an adapter error instead of choosing a control heuristically.
 
-Choose a directory first. kcode initially requests read permission only. Use the visible high-risk dialog before Auto or WISP networking. `confirm-each` requires separate approval for the tool, file changes, and processed result. `auto` intentionally skips those routine approvals for the current browser session after the warning; Stop immediately revokes it.
+Choose a directory first. kcode initially requests read permission only. The header provides Manual, Auto-write, and Full-auto. Manual approves tools, changes, and processed results separately. Auto-write automates file reads/writes, commits, and redacted result release, while shell tools still require approval. Full-auto skips these routine approvals. Selecting an automatic mode grants session authority for the selected directory; Stop revokes it. WISP networking retains its separate explicit confirmation.
 
 ## WISP relay
 

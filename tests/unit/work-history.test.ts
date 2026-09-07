@@ -70,3 +70,19 @@ describe('WorkHistoryStore', () => {
     await expect(store.loadRecovery(root as unknown as FileSystemDirectoryHandle)).resolves.toBeNull();
   });
 });
+
+it('round-trips a full transcript with long output, tool arguments and image attachments', async () => {
+  const root = new MemoryFsaRoot();
+  const handle = root as unknown as FileSystemDirectoryHandle;
+  const store = new WorkspaceHistoryStore();
+  const legacy = { id: 'legacy', createdAt: 1, provider: 'Qwen' as const, task: '旧任务', outcome: '摘要', status: 'completed' as const };
+  await store.append(handle, legacy);
+  const record = { ...legacy, id: 'full', createdAt: 2, messages: [
+    { role: 'user' as const, text: '生成图片说明', images: [{ name: 'test.png', dataUrl: 'data:image/png;base64,YQ==' }] },
+    { role: 'assistant' as const, text: '先读取文件。' },
+    { role: 'tool' as const, text: '', tool: { id: 'read', tool: 'read_file' as const, args: { path: 'large.txt' } }, status: 'done' as const, result: { text: '长输出'.repeat(100_000), exitCode: 0, truncated: false, durationMs: 12 } },
+    { role: 'assistant' as const, text: '完整结果' },
+  ] };
+  await store.append(handle, record);
+  await expect(new WorkspaceHistoryStore().load(handle)).resolves.toEqual([record, legacy]);
+});

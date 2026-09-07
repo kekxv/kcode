@@ -1,6 +1,6 @@
 import type { SiteAdapter } from './base';
 import { ChatGptAdapter } from './chatgpt';
-import { DeepSeekAdapter } from './deepseek';
+import { DeepSeekPageAdapter } from './deepseek-page';
 import { GoogleAiStudioAdapter } from './google-ai-studio';
 import { HixAdapter } from './hix';
 import { GeminiAdapter } from './gemini';
@@ -8,7 +8,7 @@ import { EasemateAdapter } from './easemate';
 import { QwenAdapter } from './qwen';
 
 const adapterFactories: Readonly<Record<string, (document: Document) => SiteAdapter>> = {
-  'https://chat.deepseek.com': (document) => new DeepSeekAdapter(document),
+  'https://chat.deepseek.com': (document) => new DeepSeekPageAdapter(document),
   'https://chat.qwen.ai': (document) => new QwenAdapter(document),
   'https://aistudio.google.com': (document) => new GoogleAiStudioAdapter(document),
   'https://chatgpt.com': (document) => new ChatGptAdapter(document),

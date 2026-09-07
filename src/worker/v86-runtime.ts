@@ -115,7 +115,15 @@ export class V86Runtime {
     // First offline launch creates a browser-local acceleration state. Storage
     // failures are non-fatal: the verified assets remain a complete cold-boot path.
     if (network.mode === 'offline' && !localSnapshot && this.emulator && !this.destroyed) {
-      await this.emulator.save_state().then((state) => this.snapshots.save(memoryProfile, state)).catch(() => undefined);
+      // Snapshot persistence is an optimization, never a prerequisite for a
+      // usable VM. A stalled IndexedDB write must not hold VM_READY forever.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.emulator.save_state().then((state) => this.snapshots.save(memoryProfile, state)).catch(() => undefined),
+          new Promise<void>(resolve => { timer = setTimeout(resolve, 2_000); }),
+        ]);
+      } finally { clearTimeout(timer); }
     }
   }
 
@@ -126,7 +134,7 @@ export class V86Runtime {
     const nonce = crypto.randomUUID();
     const marker = `KCODE_MOUNT_${nonce}`;
     const mounted = this.waitForSerialMarker(marker);
-    this.serialSend(`mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work; rc=$?; printf '${marker}:%s\\n' "$rc" >/dev/ttyS0\n`);
+    this.serialSend(`mkdir -p /work; mountpoint -q /work || mount -t 9p -o trans=virtio,version=9p2000.L,cache=none host9p /work; rc=$?; cd /work; printf '${marker}:%s\\n' "$rc" >/dev/ttyS0\n`);
     await mounted;
   }
 
@@ -162,7 +170,7 @@ export class V86Runtime {
 
   serialSend(data: string): void {
     if (!this.emulator || this.destroyed) throw new Error('VM_RUNTIME_NOT_READY');
-    this.emulator.serial0_send(data);
+    this.emulator.serial0_send(Array.from(new TextEncoder().encode(data), byte => String.fromCharCode(byte)).join(''));
   }
 
   /** Execution framing owns the per-command eight MiB output budget, not boot chatter. */
@@ -259,7 +267,7 @@ export class V86Runtime {
       let buffer = '';
       const stop = this.onSerial((delta) => {
         buffer = `${buffer}${delta}`.slice(-256);
-        const match = buffer.match(new RegExp(`${marker}:(\\d+)`));
+        const match = buffer.match(new RegExp(`(?:^|\\r?\\n)${marker}:(\\d+)\\r?\\n`));
         if (!match) return;
         stop(); clearTimeout(timeout);
         if (match[1] === '0') resolve(); else reject(new Error('VM_WORKSPACE_MOUNT_FAILED'));
@@ -289,6 +297,6 @@ export class V86Runtime {
 
   private sendBootProbe(): void {
     const marker = this.bootReady?.marker;
-    if (marker) this.serialSend(`printf '${marker}\\n' >/dev/ttyS0\n`);
+    if (marker) this.serialSend(`stty -echo; export PS1='' PS2=''; (mountpoint -q /tmp || mount -t tmpfs -o mode=1777 tmpfs /tmp) && printf '${marker}\\n' >/dev/ttyS0\n`);
   }
 }

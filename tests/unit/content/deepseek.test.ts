@@ -681,6 +681,33 @@ describe('ContentController', () => {
     controller.dispose();
   });
 
+  it('accepts Qwen’s same-document conversation URL changes while streaming', async () => {
+    // Break caught: Qwen creates and then updates its conversation URL while
+    // a response is in flight; neither is a document replacement.
+    vi.useFakeTimers();
+    const port = makePort();
+    const adapter = Object.assign(new DeepSeekAdapter(document), { allowsSameOriginNavigation: true });
+    const controller = new ContentController(port as never, adapter, window);
+    controller.start();
+    port.receive({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'qwen-new-chat', prompt: 'one' });
+    await nextMutation();
+    window.history.pushState({}, '', '#new-qwen-conversation');
+    vi.advanceTimersByTime(250);
+    await nextMutation();
+    document.querySelector('[data-testid="conversation-turns"]')!.append(makeAssistant('response'));
+    await nextMutation();
+    window.history.replaceState({}, '', '#qwen-streaming-url');
+    vi.advanceTimersByTime(250);
+    await nextMutation();
+    vi.advanceTimersByTime(1_500);
+    await nextMutation();
+
+    const events = port.postMessage.mock.calls.map(([event]) => event as { requestId?: string; kind?: string; code?: string });
+    expect(events).toContainEqual(expect.objectContaining({ requestId: 'qwen-new-chat', kind: 'CONTENT_RESPONSE_DONE' }));
+    expect(events).not.toContainEqual(expect.objectContaining({ requestId: 'qwen-new-chat', code: 'CONTENT_ABORTED' }));
+    controller.dispose();
+  });
+
   it('blocks a delta produced before the SPA poll after pushState changes the request URL', async () => {
     // Break caught: a new conversation can emit at the 100 ms delta timer before the 250 ms URL poll runs.
     vi.useFakeTimers();
@@ -772,17 +799,36 @@ describe('ContentController', () => {
     expect(events).not.toContainEqual(expect.objectContaining({ requestId: 'replaced', kind: 'CONTENT_RESPONSE_DELTA' }));
   });
 
-  it('times out a stalled prompt after 90 seconds', async () => {
-    // Break caught: a missing DeepSeek completion leaves an authenticated router request live indefinitely.
+  it('keeps waiting past ten minutes and completes when the model finally responds', async () => {
     vi.useFakeTimers();
     const port = makePort();
     const controller = new ContentController(port as never, new DeepSeekAdapter(document), window);
     controller.start();
     port.receive({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'slow', prompt: 'one' });
     await nextMutation();
-    vi.advanceTimersByTime(90_000);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(port.postMessage).not.toHaveBeenCalled();
+    document.querySelector('[data-testid="conversation-turns"]')!.append(makeAssistant('终于完成'));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'slow', kind: 'CONTENT_RESPONSE_DONE' }));
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'slow', kind: 'CONTENT_RESPONSE_DELTA', delta: '终于完成' }));
+    expect(vi.getTimerCount()).toBe(0);
+    controller.dispose();
+  });
+  it.each(['cancel', 'disconnect'] as const)('still cleans up a long-running request on %s', async action => {
+    vi.useFakeTimers();
+    const port = makePort();
+    const controller = new ContentController(port as never, new DeepSeekAdapter(document), window);
+    controller.start();
+    port.receive({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId: 'slow-stop', prompt: 'one' });
     await nextMutation();
-
-    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'slow', kind: 'CONTENT_ERROR', code: 'CONTENT_TIMEOUT' }));
+    await vi.advanceTimersByTimeAsync(180_000);
+    if (action === 'cancel') port.receive({ protocolVersion: 1, kind: 'CONTENT_ABORT_REQUEST', requestId: 'slow-stop' });
+    else port.disconnect();
+    document.querySelector('[data-testid="conversation-turns"]')!.append(makeAssistant('late response'));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(port.postMessage.mock.calls.some(([event]) => event.kind === 'CONTENT_RESPONSE_DONE' || event.kind === 'CONTENT_RESPONSE_DELTA')).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    controller.dispose();
   });
 });

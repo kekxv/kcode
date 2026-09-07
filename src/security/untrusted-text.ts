@@ -23,6 +23,7 @@ type EscapeState = 'text' | 'esc' | 'csi' | 'string' | 'string-esc';
  * over two incoming worker chunks.
  */
 export class TerminalChunkSanitizer {
+  constructor(private readonly interactive = false) {}
   private state: EscapeState = 'text';
   private csi = '';
 
@@ -36,7 +37,7 @@ export class TerminalChunkSanitizer {
           else {
             const codePoint = character.codePointAt(0)!;
             if ((codePoint >= 0x20 && codePoint !== 0x7f && !(codePoint >= 0x80 && codePoint <= 0x9f))
-              || character === '\n' || character === '\r') safe += character;
+              || character === '\n' || character === '\r' || (this.interactive && ['\b', '\t', '\x07'].includes(character))) safe += character;
           }
           break;
         case 'esc':
@@ -48,13 +49,14 @@ export class TerminalChunkSanitizer {
           } else if (character === '\u001b') {
             this.state = 'esc';
           } else {
+            if (this.interactive && /^[78DEM=>]$/.test(character)) safe += '\x1b' + character;
             this.state = 'text';
           }
           break;
         case 'csi':
           this.csi += character;
           if (character >= '@' && character <= '~') {
-            if (/^\u001b\[[0-9;]*m$/.test(this.csi)) safe += this.csi;
+            if (/^\u001b\[[0-9;]*m$/.test(this.csi) || (this.interactive && /^\u001b\[[?0-9; :]*[ABCDEFGHJKLMPSTXdfghlmnrsu@]$/.test(this.csi))) safe += this.csi;
             this.csi = '';
             this.state = 'text';
           } else if (this.csi.length > 128) {

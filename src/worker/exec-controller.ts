@@ -19,6 +19,7 @@ export type SerialRuntime = {
 };
 
 type Options = {
+  persistent?: boolean;
   nonce?: () => string;
   now?: () => number;
   onOutput?: (delta: string) => void;
@@ -86,6 +87,8 @@ export class ExecController {
     });
   }
 
+  get inputReady(): boolean { return this.active?.started === true; }
+
   cancel(): boolean {
     const active = this.active;
     if (!active) return false;
@@ -103,7 +106,21 @@ export class ExecController {
 
   private script(command: string, nonce: string): string {
     const payload = encodedCommand(command);
-    return `printf '\\036KCODE_BEGIN:${nonce}\\037\\n'\nprintf '%s' '${payload}' | base64 -d >'/tmp/kcode-${nonce}.sh'\nsetsid /bin/sh -c "cd /work && exec /bin/sh '/tmp/kcode-${nonce}.sh'" &\nkcode_pid=$!\nwait "$kcode_pid"\nkcode_status=$?\nkill -TERM -- "-$kcode_pid" 2>/dev/null || true\nrm -f '/tmp/kcode-${nonce}.sh'\nprintf '\\036KCODE_END:${nonce}:%s\\037\\n' "$kcode_status"\n`;
+    const encodedPath = `/tmp/kcode-${nonce}.b64`;
+    const scriptPath = `/tmp/kcode-${nonce}.sh`;
+    const lines = [`stty -echo 2>/dev/null; PS1= PS2=; ${this.options.persistent ? 'set -m' : 'set +m'}; : >'${encodedPath}'`];
+    // Stay below serial line-discipline limits even for large HTML/scripts.
+    for (let index = 0; index < payload.length; index += 768) lines.push(`printf '%s' '${payload.slice(index, index + 768)}' >>'${encodedPath}'`);
+    lines.push(`base64 -d '${encodedPath}' >'${scriptPath}'; kcode_prepare=$?; rm -f '${encodedPath}'`);
+    const interrupt = `trap "stty -echo 2>/dev/null; trap - INT; printf '\\036KCODE_END:${nonce}:130\\037\\n'" INT`;
+    const run = this.options.persistent
+      ? `stty echo 2>/dev/null; ${interrupt}; . '${scriptPath}'; kcode_status=$?; trap - INT; stty -echo 2>/dev/null`
+      : `setsid /bin/sh -c "cd /work && exec /bin/sh '${scriptPath}'" & kcode_pid=$!; wait "$kcode_pid"; kcode_status=$?; kill -TERM -- "-$kcode_pid" 2>/dev/null || true`;
+    // BEGIN and END share one shell input line, so shell prompts/command echo
+    // cannot appear between frames. Only the user's stdout/stderr is retained.
+    lines.push(`printf '\\036KCODE_BEGIN:${nonce}\\037'; if [ "$kcode_prepare" -eq 0 ]; then ${run}; else printf 'Command preparation failed\\n'; kcode_status=125; fi; rm -f '${scriptPath}'; printf '\\036KCODE_END:${nonce}:%s\\037\\n' "$kcode_status"`);
+    return `${lines.join('\n')}\n`;
+
   }
 
   private receive(active: ActiveExecution, delta: string): void {
@@ -183,7 +200,7 @@ export class ExecController {
   private complete(active: ActiveExecution, exitCode: number): void {
     if (this.active !== active) return;
     const durationMs = Math.max(0, (this.options.now ?? Date.now)() - active.startedAt);
-    this.dispose(active);
+    this.dispose(active, !this.options.persistent || exitCode < 0);
     active.resolve({ exitCode, output: active.output, truncated: active.truncated, durationMs, transactionId: active.transactionId, journalSummary: (this.options.journalSummary ?? emptyJournal)(active.transactionId) });
   }
 
@@ -194,12 +211,12 @@ export class ExecController {
   }
 
   /** VM destruction precedes either resolve or reject; never wait for a guest process to cooperate. */
-  private dispose(active: ActiveExecution): void {
+  private dispose(active: ActiveExecution, destroy = true): void {
     if (this.active !== active) return;
     this.active = null;
     clearTimeout(active.timeout);
     active.stop();
-    this.runtime.destroy();
+    if (destroy) this.runtime.destroy();
   }
 
   private trailingPrefix(value: string, prefix: string): string {

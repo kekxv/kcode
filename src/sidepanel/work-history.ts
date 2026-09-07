@@ -1,3 +1,4 @@
+import type { ChatMessage } from './chat-message';
 import type { ChatProvider } from '../types/protocol';
 
 const KEY = 'kcode.work-history.v1';
@@ -7,7 +8,7 @@ const MAX_TEXT_BYTES = 8 * 1024;
 const encoder = new TextEncoder();
 
 type LocalStorageArea = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void>; remove(key: string): Promise<void> };
-export type WorkRecord = { id: string; createdAt: number; provider: ChatProvider; task: string; outcome: string; status: 'completed' | 'failed' };
+export type WorkRecord = { id: string; createdAt: number; provider: ChatProvider; task: string; outcome: string; status: 'completed' | 'failed' | 'cancelled'; messages?: ChatMessage[] };
 const providers: readonly ChatProvider[] = ['DeepSeek', 'Qwen', 'Google AI Studio', 'ChatGPT', 'HIX.AI', 'Gemini', 'EaseMate'];
 const valid = (value: unknown): value is WorkRecord => typeof value === 'object' && value !== null && Object.keys(value).length === 6
   && typeof (value as WorkRecord).id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test((value as WorkRecord).id)

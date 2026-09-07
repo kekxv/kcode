@@ -4,7 +4,8 @@ defineProps<{ result: GuardedResult }>();
 const emit = defineEmits<{ release: []; cancel: [] }>();
 </script>
 <template>
-  <section aria-label="结果发布">
+  <section class="action-card" aria-label="结果发布">
+    <h3>确认发送结果</h3>
     <p>将发送 {{ result.utf8Bytes }} bytes<span v-if="result.truncated">（已截断）</span></p>
     <ul><li v-for="finding in result.findings" :key="finding.kind">{{ finding.kind }}：{{ finding.count }}</li></ul>
     <pre>{{ result.redactedText }}</pre>

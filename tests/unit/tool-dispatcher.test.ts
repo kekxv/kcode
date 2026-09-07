@@ -64,3 +64,41 @@ describe('ToolDispatcher', () => {
     expect(execution.transactionId).toMatch(/^tx_[A-Za-z0-9_]+$/);
   });
 });
+
+describe('edit_file', () => {
+  const call = { id: 'edit1', tool: 'edit_file' as const, args: { path: 'index.html', old_string: 'file', new_string: '20+i*cell' } };
+  const auth = { source: 'interactive' as const, capabilities: ['read', 'write'] as const };
+  it('reads and writes through one transaction and preserves replacement characters literally', async () => {
+    const runtime = vm(); const dispatcher = new ToolDispatcher(runtime, async () => workspace);
+    const result = await dispatcher.execute(call, auth, new AbortController().signal);
+    expect(runtime.writeFile).toHaveBeenCalledWith('index.html', '20+i*cell');
+    expect(runtime.exec).not.toHaveBeenCalled();
+    expect(result.result.text).toContain('Replaced 1');
+    await dispatcher.resolveChanges(result.transactionId, 'accept');
+    expect(runtime.commitTransaction).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['absent', 'EDIT_TEXT_NOT_FOUND'], ['i', 'EDIT_MATCH_NOT_UNIQUE'], ['', 'EDIT_EMPTY_MATCH'],
+  ])('does not write when old_string is %s', async (old_string, code) => {
+    const runtime = vm(); const read = runtime.readFile.getMockImplementation()!;
+    runtime.readFile.mockImplementation(async () => ({ ...await read(), text: 'file file' }));
+    const dispatcher = new ToolDispatcher(runtime, async () => workspace);
+    await expect(dispatcher.execute({ ...call, args: { ...call.args, old_string } }, auth, new AbortController().signal)).rejects.toThrow(code);
+    expect(runtime.writeFile).not.toHaveBeenCalled();
+    expect(runtime.rollbackTransaction).toHaveBeenCalledOnce();
+  });
+  it('replaces all occurrences only when requested, without replacement-string interpolation', async () => {
+    const runtime = vm(); const read = runtime.readFile.getMockImplementation()!;
+    runtime.readFile.mockImplementation(async () => ({ ...await read(), text: 'file file' }));
+    const dispatcher = new ToolDispatcher(runtime, async () => workspace);
+    await dispatcher.execute({ ...call, args: { ...call.args, new_string: '$&', replace_all: true } }, auth, new AbortController().signal);
+    expect(runtime.writeFile).toHaveBeenCalledWith('index.html', '$& $&');
+  });
+  it('refuses truncated reads instead of overwriting the unseen remainder', async () => {
+    const runtime = vm(); const read = runtime.readFile.getMockImplementation()!;
+    runtime.readFile.mockImplementation(async () => ({ ...await read(), truncated: true }));
+    const dispatcher = new ToolDispatcher(runtime, async () => workspace);
+    await expect(dispatcher.execute(call, auth, new AbortController().signal)).rejects.toThrow('EDIT_FILE_TOO_LARGE');
+    expect(runtime.writeFile).not.toHaveBeenCalled();
+  });
+});

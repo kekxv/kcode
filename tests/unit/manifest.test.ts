@@ -15,7 +15,7 @@ describe('manifest', () => {
     expect(manifest).not.toHaveProperty('optional_host_permissions');
     expect(JSON.stringify(manifest)).not.toMatch(/activeTab|"tabs"/);
     expect(manifest.content_security_policy.extension_pages).toBe(
-      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     );
   });
 });

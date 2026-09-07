@@ -1,3 +1,4 @@
+import { isImageAttachments, type ImageAttachment } from './attachments';
 /** Messages crossing Chrome runtime Ports are JSON values only. */
 import {
   isValidNetworkMode,
@@ -20,7 +21,7 @@ export type WorkspaceSession = {
   network: NetworkMode;
 };
 
-export type ExecutionMode = 'confirm-each' | 'auto';
+export type ExecutionMode = 'confirm-each' | 'auto-write' | 'auto';
 
 /** VM RAM is selected only before a Dedicated Worker is constructed. */
 export type MemoryProfile = 'standard' | 'high';
@@ -49,6 +50,7 @@ export type SidePanelPromptCommand = {
   requestId: string;
   targetTabId: number;
   prompt: string;
+  images?: ImageAttachment[];
 };
 
 export type SidePanelListTabsCommand = {
@@ -78,6 +80,7 @@ export type ContentSendPromptCommand = {
   kind: 'CONTENT_SEND_PROMPT';
   requestId: string;
   prompt: string;
+  images?: ImageAttachment[];
 };
 
 export type ContentAbortRequestCommand = {
@@ -97,8 +100,10 @@ export type RoutedContentEvent = ContentEvent & { sourceTabId: number };
 
 /** Dedicated Worker messages use structured clone; handles never cross runtime Ports. */
 export type VMRequest =
-  | { kind: 'VM_INIT'; requestId: string; session: WorkspaceSession; memoryProfile?: MemoryProfile }
+  | { kind: 'VM_INIT'; requestId: string; session: WorkspaceSession; memoryProfile?: MemoryProfile; persistent?: boolean }
+  | { kind: 'VM_UPDATE_SESSION'; requestId: string; session: WorkspaceSession }
   | { kind: 'VM_ATTACH_WORKSPACE'; requestId: string; handle: FileSystemDirectoryHandle }
+  | { kind: 'VM_STDIN'; requestId: string; targetRequestId: string; data: string }
   | { kind: 'VM_EXEC'; requestId: string; command: string; timeoutMs: number }
   | { kind: 'VM_READ_FILE'; requestId: string; path: string; maxBytes: number }
   | { kind: 'VM_WRITE_FILE'; requestId: string; path: string; content: string }
@@ -163,7 +168,8 @@ export const isJsonValue = (value: unknown): boolean => {
 const portBytesAtMost = (value: unknown): boolean => {
   if (!isJsonValue(value)) return false;
   try {
-    return encoder.encode(JSON.stringify(value)).byteLength <= MAX_PORT_BYTES;
+    const limit = isRecord(value) && value.kind === 'CONTENT_SEND_PROMPT' && isImageAttachments(value.images) ? 9 * 1024 * 1024 : MAX_PORT_BYTES;
+    return encoder.encode(JSON.stringify(value)).byteLength <= limit;
   } catch {
     return false;
   }
@@ -187,7 +193,7 @@ export const isSidePanelCommand = (value: unknown): value is SidePanelCommand =>
   isRecord(value)
   && isPortEnvelope(value)
   && ((value.kind === 'CONTENT_SEND_PROMPT'
-    && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'targetTabId', 'prompt'])
+    && (hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'targetTabId', 'prompt']) || (hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'targetTabId', 'prompt', 'images']) && isImageAttachments(value.images)))
     && isFiniteInteger(value.targetTabId)
     && value.targetTabId >= 0
     && bytesAtMost(value.prompt, MAX_PORT_BYTES))
@@ -215,7 +221,7 @@ export const isContentCommand = (value: unknown): value is ContentCommand =>
   isRecord(value)
   && isPortEnvelope(value)
   && ((value.kind === 'CONTENT_SEND_PROMPT'
-    && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'prompt'])
+    && (hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'prompt']) || (hasExactKeys(value, ['protocolVersion', 'kind', 'requestId', 'prompt', 'images']) && isImageAttachments(value.images)))
     && bytesAtMost(value.prompt, MAX_PORT_BYTES))
     || (value.kind === 'CONTENT_ABORT_REQUEST'
       && hasExactKeys(value, ['protocolVersion', 'kind', 'requestId'])));
@@ -252,10 +258,16 @@ export const isVMRequest = (value: unknown): value is VMRequest => {
   switch (value.kind) {
     case 'VM_INIT':
       return (hasExactKeys(value, ['kind', 'requestId', 'session'])
-        || (hasExactKeys(value, ['kind', 'requestId', 'session', 'memoryProfile']) && normalizeMemoryProfile(value.memoryProfile) !== null))
+        || (hasExactKeys(value, ['kind', 'requestId', 'session', 'memoryProfile']) && normalizeMemoryProfile(value.memoryProfile) !== null)
+        || (hasExactKeys(value, ['kind', 'requestId', 'session', 'persistent']) && typeof value.persistent === 'boolean')
+        || (hasExactKeys(value, ['kind', 'requestId', 'session', 'memoryProfile', 'persistent']) && typeof value.persistent === 'boolean' && normalizeMemoryProfile(value.memoryProfile) !== null))
         && isWorkspaceSession(value.session);
+    case 'VM_UPDATE_SESSION':
+      return hasExactKeys(value, ['kind', 'requestId', 'session']) && isWorkspaceSession(value.session);
     case 'VM_ATTACH_WORKSPACE':
       return hasExactKeys(value, ['kind', 'requestId', 'handle']) && isDirectoryHandle(value.handle);
+    case 'VM_STDIN':
+      return hasExactKeys(value, ['kind', 'requestId', 'targetRequestId', 'data']) && isId(value.targetRequestId) && bytesAtMost(value.data, 8192);
     case 'VM_EXEC':
       return hasExactKeys(value, ['kind', 'requestId', 'command', 'timeoutMs'])
         && bytesAtMost(value.command, MAX_VM_COMMAND_BYTES)

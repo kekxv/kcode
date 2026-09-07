@@ -79,10 +79,11 @@ describe('extension message authentication', () => {
   it('restricts local and session storage before background startup uses extension state', async () => {
     const calls: string[] = [];
     vi.stubGlobal('chrome', {
-      sidePanel: { setPanelBehavior: vi.fn() },
+      sidePanel: { setPanelBehavior: vi.fn(), setOptions: vi.fn() },
+      action: { onClicked: { addListener: vi.fn() } },
       storage: {
         local: { setAccessLevel: vi.fn(() => { calls.push('local'); }) },
-        session: { setAccessLevel: vi.fn(() => { calls.push('session'); }) },
+        session: { setAccessLevel: vi.fn(() => { calls.push('session'); }), get: vi.fn().mockResolvedValue({}) },
       },
       runtime: { onConnect: { addListener: vi.fn() }, id: extensionId, getURL: vi.fn().mockReturnValue(panelUrl) },
     });

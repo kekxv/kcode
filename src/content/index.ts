@@ -3,7 +3,6 @@ import { AdapterError, type SiteAdapter } from './adapters/base';
 import { adapterForOrigin } from './adapters/registry';
 
 const CONTENT_PORT = 'kcode-content';
-const REQUEST_TIMEOUT_MS = 90_000;
 const TERMINAL_ID_LIMIT = 1_024;
 const NAVIGATION_POLL_MS = 250;
 
@@ -14,7 +13,6 @@ type ActiveRequest = {
   requestId: string;
   startingHref: string;
   controller: AbortController;
-  timeout: ReturnType<typeof setTimeout>;
   navigationWatch?: ReturnType<typeof setInterval>;
 };
 
@@ -82,14 +80,13 @@ export class ContentController {
       requestId: command.requestId,
       startingHref: this.pageWindow.location.href,
       controller,
-      timeout: setTimeout(() => this.abortActive('CONTENT_TIMEOUT'), REQUEST_TIMEOUT_MS),
     };
     active.navigationWatch = setInterval(() => {
       if (this.active === active && !this.isCurrentLocation(active)) this.abortActive('CONTENT_ABORTED');
     }, NAVIGATION_POLL_MS);
     this.active = active;
     try {
-      const anchor = await this.adapter.sendPrompt(command.prompt, controller.signal);
+      const anchor = await this.adapter.sendPrompt(command.prompt, controller.signal, command.images);
       if (this.active !== active) return;
       await this.adapter.watchResponse(anchor, controller.signal, (delta) => {
         if (this.active !== active) return;
@@ -118,16 +115,14 @@ export class ContentController {
     }
   }
 
-  private abortActive(code?: 'CONTENT_ABORTED' | 'CONTENT_TIMEOUT' | 'CONTENT_SESSION_REPLACED'): void {
+  private abortActive(code?: 'CONTENT_ABORTED' | 'CONTENT_SESSION_REPLACED'): void {
     const active = this.active;
     if (!active) return;
     if (code && code !== 'CONTENT_ABORTED' && !this.isCurrentLocation(active)) code = 'CONTENT_ABORTED';
     this.clearActive(active);
     active.controller.abort();
     if (code) {
-      const message = code === 'CONTENT_TIMEOUT'
-        ? 'The chat-page request timed out.'
-        : code === 'CONTENT_SESSION_REPLACED'
+      const message = code === 'CONTENT_SESSION_REPLACED'
           ? 'The authenticated router session was replaced.'
           : 'The chat page was replaced.';
       this.postError(active.requestId, code, message);
@@ -136,13 +131,24 @@ export class ContentController {
 
   private clearActive(active: ActiveRequest): void {
     if (this.active !== active) return;
-    clearTimeout(active.timeout);
     if (active.navigationWatch !== undefined) clearInterval(active.navigationWatch);
     this.active = undefined;
   }
 
   private isCurrentLocation(active: ActiveRequest): boolean {
-    return this.pageWindow.location.href === active.startingHref;
+    const currentHref = this.pageWindow.location.href;
+    if (currentHref === active.startingHref) return true;
+    // Qwen rewrites same-document conversation URLs while it creates and
+    // streams a chat. A real document replacement still emits pagehide, and
+    // a cross-origin navigation still fails this boundary.
+    if (
+      this.adapter.allowsSameOriginNavigation
+      && new URL(currentHref).origin === new URL(active.startingHref).origin
+    ) {
+      active.startingHref = currentHref;
+      return true;
+    }
+    return false;
   }
 
   private postError(requestId: string, code: string, message: string): void {
@@ -169,7 +175,25 @@ const canBootContentScript = (): boolean =>
 if (canBootContentScript()) {
   const adapter = adapterForOrigin(window.location.origin, document);
   if (adapter) {
-    const port = chrome.runtime.connect({ name: CONTENT_PORT });
-    new ContentController(port, adapter).start();
+    let stopped = false;
+    let reconnect: ReturnType<typeof setTimeout> | undefined;
+    window.addEventListener('pagehide', () => { stopped = true; if (reconnect) clearTimeout(reconnect); });
+    const connect = (): void => {
+      if (stopped) return;
+      try {
+        const port = chrome.runtime.connect({ name: CONTENT_PORT });
+        const controller = new ContentController(port, adapter);
+        controller.start();
+        port.onDisconnect.addListener(() => {
+          controller.dispose();
+          if (!stopped) reconnect = setTimeout(connect, 1000);
+        });
+      } catch {
+        // An extension reload invalidates this content-script context. A page
+        // refresh is required; do not retry or replay an old task.
+        stopped = true;
+      }
+    };
+    connect();
   }
 }

@@ -3,9 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/vue';
 
 const terminalWrites = vi.hoisted(() => vi.fn());
+const terminalThemes = vi.hoisted(() => vi.fn());
 vi.mock('../../src/sidepanel/terminal-manager', () => ({
   TerminalManager: class {
     mount = vi.fn();
+    setTheme = terminalThemes;
+    onInput = vi.fn();
     write = terminalWrites;
     dispose = vi.fn();
   },
@@ -13,7 +16,7 @@ vi.mock('../../src/sidepanel/terminal-manager', () => ({
 
 import TerminalPane from '../../src/sidepanel/components/TerminalPane.vue';
 
-afterEach(() => { cleanup(); terminalWrites.mockReset(); });
+afterEach(() => { cleanup(); terminalWrites.mockReset(); terminalThemes.mockReset(); });
 
 describe('TerminalPane', () => {
   it('writes only deltas that were appended since the previous prop update', async () => {
@@ -27,5 +30,8 @@ describe('TerminalPane', () => {
 
     await vi.waitFor(() => expect(terminalWrites).toHaveBeenCalledTimes(2));
     expect(terminalWrites.mock.calls.map(([chunk]) => chunk)).toEqual(['first', 'second']);
+    await view.rerender({ chunks: ['first', 'second'], theme: 'light' });
+    expect(terminalThemes).toHaveBeenLastCalledWith('light');
+    expect(terminalWrites).toHaveBeenCalledTimes(2);
   });
 });

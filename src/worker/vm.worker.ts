@@ -14,6 +14,9 @@ let execution: { requestId: string; controller: ExecController; heartbeat: Retur
 let outputLimit: (() => void) | null = null;
 let emulatorDisposed = false;
 let initialized = false;
+let persistent = false;
+let sessionNetwork = '';
+let fileOperation = false;
 
 const send = (event: VMEvent): void => self.postMessage(event);
 const fail = (requestId: string, code: string, message: string): void =>
@@ -64,6 +67,8 @@ async function dispatch(value: unknown): Promise<void> {
       return;
     }
     initialized = true;
+    persistent = value.persistent === true;
+    sessionNetwork = JSON.stringify(value.session.network);
     const generation = invalidateRuntime();
     try {
       const memoryProfile = normalizeMemoryProfile(value.memoryProfile);
@@ -85,6 +90,16 @@ async function dispatch(value: unknown): Promise<void> {
     return;
   }
 
+  if (value.kind === 'VM_UPDATE_SESSION') {
+    if (!persistent || !runtime || emulatorDisposed || execution || fileOperation || activeTransactionId
+      || value.session.workspaceId !== authorizer.workspaceBinding() || JSON.stringify(value.session.network) !== sessionNetwork) {
+      fail(requestId, 'VM_SESSION_UPDATE_FORBIDDEN', 'Session authority can change only between operations in the same workspace.');
+      return;
+    }
+    authorizer.activate(value.session);
+    send({ kind: 'VM_READY', requestId });
+    return;
+  }
   // Directory authority is admitted only after the authorizer accepted VM_INIT.
   if (!isAuthorizedVMRequest(value, authorizer)) {
     fail(requestId, 'VM_UNAUTHORIZED_REQUEST', 'The VM request is not authorized for this session.');
@@ -113,6 +128,14 @@ async function dispatch(value: unknown): Promise<void> {
     }
     return;
   }
+  if (value.kind === 'VM_STDIN') {
+    if (!persistent || !runtime || execution?.requestId !== value.targetRequestId || !execution.controller.inputReady) {
+      fail(requestId, 'VM_STDIN_NOT_READY', 'Input is accepted only by the active persistent execution.'); return;
+    }
+    try { runtime.serialSend(value.data); send({ kind: 'VM_READY', requestId }); }
+    catch { fail(requestId, 'VM_SERIAL_SEND_FAILED', 'Input could not be delivered.'); }
+    return;
+  }
   if (value.kind === 'VM_CANCEL') {
     const current = execution;
     if (current?.requestId === value.targetRequestId) current.controller.cancel();
@@ -122,7 +145,7 @@ async function dispatch(value: unknown): Promise<void> {
     return;
   }
   if (value.kind === 'VM_BEGIN_TRANSACTION' || value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') {
-    if (execution) {
+    if (execution || fileOperation) {
       fail(requestId, 'VM_EXEC_ACTIVE', 'The transaction is frozen until the disposable execution ends.');
       return;
     }
@@ -138,16 +161,16 @@ async function dispatch(value: unknown): Promise<void> {
         runtime.beginTransaction(value.transactionId, capabilities);
         activeTransactionId = value.transactionId;
       } else if (value.kind === 'VM_COMMIT_TRANSACTION') {
-        if (!emulatorDisposed || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
+        if ((!persistent && !emulatorDisposed) || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
         await runtime.commitTransaction();
         activeTransactionId = null;
       } else {
-        if (!emulatorDisposed || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
+        if ((!persistent && !emulatorDisposed) || activeTransactionId === null) throw new Error('VM_TRANSACTION_STATE');
         await runtime.rollbackTransaction();
         activeTransactionId = null;
       }
       send({ kind: 'VM_READY', requestId });
-      if ((value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') && !execution) {
+      if ((value.kind === 'VM_COMMIT_TRANSACTION' || value.kind === 'VM_ROLLBACK_TRANSACTION') && !execution && !persistent) {
         clearRuntime();
         self.close();
       }
@@ -156,7 +179,7 @@ async function dispatch(value: unknown): Promise<void> {
     }
     return;
   }
-  if (!runtime || !workspaceAttached || execution || emulatorDisposed) {
+  if (!runtime || !workspaceAttached || execution || fileOperation || emulatorDisposed) {
     fail(requestId, 'VM_RUNTIME_NOT_READY', 'The Linux runtime is not ready.');
     return;
   }
@@ -165,30 +188,32 @@ async function dispatch(value: unknown): Promise<void> {
     const generation = lifecycleGeneration;
     const transactionId = activeTransactionId ?? 'no_transaction';
     const startedAt = performance.now();
+    fileOperation = true;
     try {
       const result = value.kind === 'VM_READ_FILE'
         ? await operationRuntime.readFile(value.path, value.maxBytes)
         : await operationRuntime.writeFile(value.path, value.content);
       if (!isCurrentRuntime(generation, operationRuntime)) return;
-      emulatorDisposed = true;
+      emulatorDisposed = !persistent;
       send({
         kind: 'VM_FILE_RESULT', requestId, ...result,
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
         transactionId,
         journalSummary: operationRuntime.journalSummary(transactionId),
       });
-      if (transactionId === 'no_transaction') { clearRuntime(); self.close(); }
+      if (transactionId === 'no_transaction' && !persistent) { clearRuntime(); self.close(); }
     } catch (error) {
       if (!isCurrentRuntime(generation, operationRuntime)) return;
-      emulatorDisposed = true;
+      emulatorDisposed = !persistent;
       fail(requestId, error instanceof Error ? error.message : 'VM_FILE_OPERATION_FAILED', 'The confined workspace file operation failed.');
-      if (transactionId === 'no_transaction') { clearRuntime(); self.close(); }
-    }
+      if (transactionId === 'no_transaction' && !persistent) { clearRuntime(); self.close(); }
+    } finally { fileOperation = false; }
     return;
   }
   const executionRuntime = runtime;
   executionRuntime.resetCommandSerialBudget();
   const controller = new ExecController(executionRuntime, {
+    persistent,
     onOutput: (delta) => {
       if (isCurrentRuntime(lifecycleGeneration, executionRuntime) && execution?.requestId === requestId) {
         send({ kind: 'VM_OUTPUT_DELTA', requestId, delta });
@@ -208,9 +233,9 @@ async function dispatch(value: unknown): Promise<void> {
     clearInterval(heartbeat);
     execution = null;
     outputLimit = null;
-    emulatorDisposed = true;
+    emulatorDisposed = !persistent || result.exitCode < 0;
     send({ kind: 'VM_RESULT', requestId, ...result });
-    if (transactionId === 'no_transaction') {
+    if (transactionId === 'no_transaction' && !persistent) {
       clearRuntime();
       self.close();
     }
@@ -222,7 +247,7 @@ async function dispatch(value: unknown): Promise<void> {
     emulatorDisposed = true;
     const code = error instanceof Error ? error.message : 'VM_EXEC_FAILED';
     fail(requestId, code, 'The disposable Linux execution ended without a result.');
-    if (transactionId === 'no_transaction') {
+    if (transactionId === 'no_transaction' && !persistent) {
       clearRuntime();
       self.close();
     }

@@ -4,6 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/vu
 import App, { sidePanelServicesKey, type SidePanelServices } from '../../src/sidepanel/App.vue';
 import { TabClient } from '../../src/sidepanel/tab-client';
 
+vi.mock('../../src/sidepanel/components/TerminalPane.vue', () => ({
+  default: { methods: { writeLocal() {}, focus() {} }, props: ['chunks', 'theme'], emits: ['input', 'ready'], template: '<section aria-label="安全终端"><button @click="$emit(\'input\', \'export HELLO=world; pwd\'); $emit(\'input\', \'\\r\')">测试命令</button></section>' },
+}));
 const fakeServices = (ready = false): SidePanelServices => {
   let transactionId = 'no_transaction';
   const journal = (state: 'clean' | 'dirty' = 'clean') => ({ transactionId, state, entries: state === 'dirty' ? [{ path: 'notes.txt', operation: 'write' as const, originalBytes: 0, resultingBytes: 2 }] : [], journalBytes: state === 'dirty' ? 10 : 0, writtenBytes: state === 'dirty' ? 2 : 0 });
@@ -16,7 +19,7 @@ const fakeServices = (ready = false): SidePanelServices => {
     },
     tab: { listConnectedTabs: vi.fn().mockResolvedValue(ready ? [{ id: 7, title: 'DeepSeek', provider: 'DeepSeek' as const }] : []), sendPrompt: vi.fn() },
     vm: {
-      terminate: vi.fn(), selectMemoryProfile: vi.fn(), attachWorkspace: vi.fn(async () => undefined), start: vi.fn(async () => undefined), subscribe: vi.fn(() => () => {}),
+      sendInput: vi.fn(async () => undefined), terminate: vi.fn(), selectMemoryProfile: vi.fn(), attachWorkspace: vi.fn(async () => undefined), start: vi.fn(async () => undefined), subscribe: vi.fn(() => () => {}),
       beginTransaction: vi.fn(async (next: string) => { transactionId = next; }),
       exec: vi.fn(async () => ({ output: 'AKIA1234567890ABCDEF', exitCode: 0, truncated: false, durationMs: 1, transactionId, journalSummary: journal(transactionId === 'no_transaction' ? 'clean' : 'dirty') })),
       readFile: vi.fn(async () => ({ text: 'file', truncated: false, durationMs: 1, transactionId, journalSummary: journal() })),
@@ -32,12 +35,63 @@ const fakeServices = (ready = false): SidePanelServices => {
 
 afterEach(() => cleanup());
 
+const selectExecutionMode = async (mode: string) => {
+  await fireEvent.click(screen.getByRole('button', { name: '执行模式' }));
+  const label = mode === 'auto' ? '全自动' : mode === 'auto-write' ? '自动写入' : '手动';
+  await fireEvent.click(screen.getByRole('option', { name: new RegExp(label) }));
+};
 const openSettings = async (): Promise<void> => {
   await fireEvent.click(screen.getByRole('button', { name: '会话设置' }));
   await screen.findByRole('dialog', { name: '会话设置' });
 };
 
 describe('Side Panel shell', () => {
+  it('runs a manual VM command without a model connection and commits locally', async () => {
+    const services = fakeServices(true);
+    services.tab.listConnectedTabs = vi.fn().mockResolvedValue([]);
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '选择工作目录' }).textContent).toContain('已连接'));
+    await fireEvent.click(screen.getByRole('button', { name: /终端/ }));
+    await fireEvent.click(screen.getByRole('button', { name: '测试命令' }));
+    await screen.findByText('命令结束 · exit 0');
+    expect(services.vm.start).toHaveBeenCalledWith(expect.objectContaining({ capabilities: ['read', 'write', 'delete'] }), 'standard', true);
+    expect(services.vm.exec).toHaveBeenCalledWith(expect.stringContaining('export HELLO=world; pwd'), expect.anything());
+    expect(services.vm.commitTransaction).toHaveBeenCalledOnce();
+    expect(services.tab.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('blocks shell execution after denied directory permission', async () => {
+    const services = fakeServices(true);
+    services.workspace.requestReadWrite = vi.fn().mockResolvedValue('denied');
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '选择工作目录' }).textContent).toContain('已连接'));
+    await fireEvent.click(screen.getByRole('button', { name: /终端/ }));
+    await fireEvent.click(screen.getByRole('button', { name: '测试命令' }));
+    await screen.findByText('执行失败：DIRECTORY_PERMISSION_DENIED');
+    expect(services.vm.exec).not.toHaveBeenCalled();
+  });
+
+  it.each(['auto-write', 'auto'])('switches directly to %s and completes a file call with prose', async mode => {
+    const services = fakeServices(true);
+    services.consent.hasValid = vi.fn().mockResolvedValue(true);
+    const answers = ['我来创建页面。<tool_call>{"id":"call_5","tool":"write_file","args":{"path":"index.html","content":"<html>demo</html>"}}</tool_call>', '页面完成'];
+    services.tab.sendPrompt = vi.fn(async (_id, _prompt, handlers) => { handlers?.onDelta?.(answers.shift() ?? ''); handlers?.onDone?.(); });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '选择工作目录' }).textContent).toContain('已连接'));
+    await selectExecutionMode(mode);
+    await waitFor(() => expect(services.consent.grant).toHaveBeenCalledWith(['auto'], { workspaceId: 'workspace-1', relayUrl: null }));
+    await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '创建页面');
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+    await screen.findByText('页面完成');
+    expect(screen.getByText('我来创建页面。')).toBeTruthy();
+    expect(document.querySelector('.chat-feed')?.textContent).not.toContain('<tool_call');
+    expect(services.vm.writeFile).toHaveBeenCalledWith('index.html', '<html>demo</html>');
+    expect(services.vm.commitTransaction).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('region', { name: '工具批准' })).toBeNull();
+    await selectExecutionMode('confirm-each');
+    expect(screen.getByRole('button', { name: '执行模式' }).textContent).toContain('手动');
+  });
+
   it('lists only tabs reported by the authenticated background Port', async () => {
     // Break caught: the panel calls chrome.tabs.query or accepts a mismatched listing response.
     let listener: ((message: unknown) => void) | undefined;
@@ -93,6 +147,20 @@ describe('Side Panel shell', () => {
     expect(task).toHaveProperty('value', 'write hello.txt');
   });
 
+  it('keeps Chinese IME composition in the task composer', async () => {
+    // Break caught: a composition update must not clear a partially committed
+    // CJK value or make the textarea lose focus.
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: fakeServices(false) } } });
+    const task = await screen.findByRole('textbox', { name: '任务' });
+    await fireEvent.compositionStart(task, { data: '' });
+    await fireEvent.input(task, { target: { value: '中文' }, data: '中文', inputType: 'insertCompositionText', isComposing: true });
+    await fireEvent.compositionEnd(task, { data: '中文' });
+    expect(task).toHaveProperty('value', '中文');
+    expect(task.getAttribute('id')).toBe('task-prompt');
+    expect(task.getAttribute('name')).toBe('task-prompt');
+    expect(getComputedStyle(task).fontSize).not.toBe('0px');
+  });
+
   it('refreshes the chat connection after the chat page becomes available', async () => {
     // Break caught: the side panel snapshots its connection state at mount and remains disconnected after a chat tab finishes loading.
     const services = fakeServices(false);
@@ -100,9 +168,9 @@ describe('Side Panel shell', () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: 7, title: 'DeepSeek', provider: 'DeepSeek' }]);
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
-    await screen.findByText('未连接聊天');
+    await screen.findByText('等待聊天页面连接');
     await fireEvent.click(screen.getByRole('button', { name: '刷新聊天连接' }));
-    await waitFor(() => expect(screen.getByText('聊天已连接')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('DeepSeek')).toBeTruthy());
     expect(services.tab.listConnectedTabs).toHaveBeenCalledTimes(2);
   });
 
@@ -219,13 +287,35 @@ describe('Side Panel shell', () => {
       .toBeLessThan((services.relaySettings.save as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
   });
 
-  it('runs a confirm-each tool turn through approval, journal review, and redacted release', async () => {
+  it('shows an explicit terminal state after exhausted corrections and allows a new task', async () => {
+    const services = fakeServices(true);
+    const answers = ['<tool_call>{</tool_call>', '<tool_call>{</tool_call>', '<tool_call>{</tool_call>', '下一任务完成'];
+    services.tab.sendPrompt = vi.fn(async (_tab, _prompt, handlers) => { handlers?.onDelta?.(answers.shift() ?? ''); });
+    render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+    const input = await screen.findByRole('textbox', { name: '任务' });
+    await fireEvent.update(input, '创建页面');
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+    expect(await screen.findByText(/任务已结束（失败）：模型连续/)).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('执行失败');
+    expect(services.tab.sendPrompt).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('region', { name: '工具批准' })).toBeNull();
+    await fireEvent.update(input, '下一任务');
+    await waitFor(() => expect((screen.getByRole('button', { name: '开始任务' }) as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+    expect(await screen.findByText('下一任务完成')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('任务已完成');
+  });
+
+  it.each(['standard', 'qwen-missing-bracket', 'format-recovery'])('runs %s through approval, review, release and the next model turn', async (variant) => {
     // Break caught: the visible Start button must drive the bounded orchestrator instead of sending the raw goal once and stopping.
     const services = fakeServices(true);
     const answers = [
       '<tool_call>{"id":"call_1","tool":"bash","args":{"cmd":"printf ok > notes.txt","workspace":"write"}}</tool_call>',
       '任务完成',
     ];
+    if (variant === 'qwen-missing-bracket') answers[0] = '<tool_call_to_1><invoke name="bash"><parameter name="cmd">printf ok > notes.txt</parameter</invoke></tool_call_to_1>';
+    if (variant === 'format-recovery') answers.unshift('<tool_call>{</tool_call>');
+    const expectedTurns = answers.length;
     services.tab.sendPrompt = vi.fn(async (_tabId, _prompt, handlers) => { handlers?.onDelta?.(answers.shift() ?? ''); handlers?.onDone?.(); });
     render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
     const task = await screen.findByRole('textbox', { name: '任务' });
@@ -240,8 +330,15 @@ describe('Side Panel shell', () => {
     await fireEvent.click(screen.getByRole('button', { name: '发送脱敏结果' }));
 
     expect(await screen.findByText('任务完成')).toBeTruthy();
-    expect(services.tab.sendPrompt).toHaveBeenCalledTimes(2);
-    expect((services.tab.sendPrompt as ReturnType<typeof vi.fn>).mock.calls[1][1]).toContain('[REDACTED:aws-access-key]');
+    expect(screen.getByText('更新 notes.txt').closest('article')?.dataset.role).toBe('user');
+    expect(screen.getByText('任务完成').closest('article')?.dataset.role).toBe('assistant');
+    const toolCard = document.querySelector('article[data-role="tool"]');
+    expect(toolCard?.textContent).toContain('printf ok > notes.txt');
+    expect(toolCard?.textContent).toContain('已完成');
+    expect(toolCard?.textContent).not.toContain('<tool_call');
+    expect(services.tab.sendPrompt).toHaveBeenCalledTimes(expectedTurns);
+    if (variant === 'format-recovery') expect(screen.getByText(/正在请求模型修正/)).toBeTruthy();
+    expect((services.tab.sendPrompt as ReturnType<typeof vi.fn>).mock.calls[expectedTurns - 1][1]).toContain('[REDACTED:aws-access-key]');
     expect(services.vm.commitTransaction).toHaveBeenCalledOnce();
   });
 
@@ -261,7 +358,7 @@ describe('Side Panel shell', () => {
     await screen.findByRole('dialog', { name: '高风险能力确认' });
     for (const box of screen.getAllByRole('checkbox', { name: /AI 可以|仓库|工具结果|操作可能/ })) await fireEvent.click(box);
     await fireEvent.click(screen.getByRole('button', { name: '启用 Auto' }));
-    await screen.findByText('Auto');
+    await waitFor(() => expect(screen.getByRole('button', { name: '执行模式' }).textContent).toContain('全自动'));
     await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), '自动更新');
     await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
 
@@ -318,10 +415,10 @@ describe('Side Panel shell', () => {
     await fireEvent.update(memory, 'high');
     await fireEvent.click(screen.getByRole('button', { name: '确认切换到 512 MiB' }));
 
-    expect(await screen.findByText('确认每步')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '执行模式' }).textContent).toContain('手动');
     expect((screen.getByRole('checkbox', { name: '连接工作区网络' }) as HTMLInputElement).checked).toBe(false);
     expect(services.vm.terminate).toHaveBeenCalledWith('VM_MEMORY_PROFILE_CHANGED');
-    expect(services.vm.selectMemoryProfile).toHaveBeenCalledWith('high');
+    await waitFor(() => expect(services.vm.selectMemoryProfile).toHaveBeenCalledWith('high'));
     expect(services.consent.revokeAll).toHaveBeenCalledTimes(4);
   });
 
@@ -345,7 +442,7 @@ describe('Side Panel shell', () => {
     resolveGrant();
 
     await waitFor(() => expect(services.vm.selectMemoryProfile).toHaveBeenCalledWith('high'));
-    expect(screen.getByText('确认每步')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '执行模式' }).textContent).toContain('手动');
     expect(screen.queryByText('Auto')).toBeNull();
   });
 
@@ -409,4 +506,65 @@ describe('Side Panel shell', () => {
     expect(services.vm.terminate).toHaveBeenCalledWith('RELAY_URL_CHANGED');
     expect(services.consent.revokeAll).toHaveBeenCalledTimes(3);
   });
+});
+
+it('loads the latest saved task, switches summaries locally and starts a fresh view without executing tools', async () => {
+  const services = fakeServices(true);
+  services.workspaceHistory.load = vi.fn(async () => [
+    { id: 'newer', createdAt: 2000, provider: 'DeepSeek' as const, task: '最近任务', outcome: '最近结果', status: 'completed' as const },
+    { id: 'older', createdAt: 1000, provider: 'DeepSeek' as const, task: '旧任务', outcome: '旧结果', status: 'completed' as const },
+  ]);
+  render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+  await screen.findByRole('button', { name: /历史任务/ });
+  await screen.findByText('最近结果');
+  expect(screen.getByText('最近结果')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: /历史任务/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /旧任务/ }));
+  expect(screen.getByText('旧结果')).toBeTruthy();
+  expect(screen.queryByText('最近结果')).toBeNull();
+  expect(services.tab.sendPrompt).not.toHaveBeenCalled();
+  expect(services.workspace.requestReadWrite).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('button', { name: '新对话' }));
+  expect(screen.queryByText('旧结果')).toBeNull();
+});
+
+it('restores all saved messages and tool results without executing the tool again', async () => {
+  const services = fakeServices(true);
+  services.workspaceHistory.load = vi.fn(async () => [{
+    id: 'full', createdAt: 2000, provider: 'DeepSeek' as const, task: '完整任务', outcome: '最终答复', status: 'completed' as const,
+    messages: [
+      { role: 'user' as const, text: '完整任务' },
+      { role: 'assistant' as const, text: '先检查工作区。' },
+      { role: 'tool' as const, text: '', tool: { id: 'inspect', tool: 'bash' as const, args: { cmd: 'ls /work', workspace: 'read' as const } }, status: 'done' as const, result: { text: 'README.md\n完整执行输出', exitCode: 0, durationMs: 20, truncated: false } },
+      { role: 'assistant' as const, text: '最终答复' },
+    ],
+  }]);
+  render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+  await screen.findByText('先检查工作区。');
+  expect(screen.getByText(/完整执行输出/)).toBeTruthy();
+  expect(screen.getByText('最终答复')).toBeTruthy();
+  expect(screen.queryByText(/旧版记录仅保存/)).toBeNull();
+  expect(services.vm.exec).not.toHaveBeenCalled();
+  expect(services.tab.sendPrompt).not.toHaveBeenCalled();
+});
+
+it('restores the last editing mode without granting execution on mount and saves a manual selection', async () => {
+  const services = fakeServices(true);
+  services.executionSettings = { load: vi.fn(async () => 'auto-write' as const), save: vi.fn(async mode => mode) };
+  render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+  await waitFor(() => expect(screen.getByRole('button', { name: '执行模式' }).textContent).toContain('自动写入'));
+  expect(services.consent.grant).not.toHaveBeenCalled();
+  expect(services.workspace.requestReadWrite).not.toHaveBeenCalled();
+  await selectExecutionMode('confirm-each');
+  await waitFor(() => expect(services.executionSettings?.save).toHaveBeenCalledWith('confirm-each'));
+});
+
+it('shows the failing adapter stage rather than only ADAPTER_DOM_CHANGED', async () => {
+  const services = fakeServices(true);
+  services.tab.sendPrompt = vi.fn(async () => { throw Object.assign(new Error('ADAPTER_DOM_CHANGED'), { detail: '发送前 · 输入区域：未找到可见节点。' }); });
+  render(App, { global: { provide: { [sidePanelServicesKey as symbol]: services } } });
+  await fireEvent.update(screen.getByRole('textbox', { name: '任务' }), 'hello');
+  await waitFor(() => expect((screen.getByRole('button', { name: '开始任务' }) as HTMLButtonElement).disabled).toBe(false));
+  await fireEvent.click(screen.getByRole('button', { name: '开始任务' }));
+  await screen.findByText(/任务结束：ADAPTER_DOM_CHANGED.*发送前 · 输入区域/s);
 });

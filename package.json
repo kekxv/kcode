@@ -12,6 +12,8 @@
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:qwen": "vitest run tests/simulation/qwen-interaction.test.ts tests/unit/content/provider-adapters.test.ts tests/unit/tool-parser.test.ts tests/unit/orchestrator.test.ts tests/unit/sidepanel.test.ts",
+    "test:deepseek": "vitest run tests/unit/content/deepseek.test.ts tests/unit/content/deepseek-page.test.ts tests/unit/content/registry.test.ts tests/simulation/deepseek-interaction.test.ts",
     "test:e2e": "playwright test",
     "assets:sync": "node scripts/sync-v86-assets.mjs",
     "assets:verify": "node scripts/verify-vm-assets.mjs",

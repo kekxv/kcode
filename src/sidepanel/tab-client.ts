@@ -1,3 +1,4 @@
+import { isImageAttachments, type ImageAttachment } from '../types/attachments';
 import {
   createRequestId,
   isRoutedContentEvent,
@@ -8,6 +9,7 @@ import {
 
 export type ConnectedTab = { id: number; title: string; provider: ChatProvider };
 export type PromptHandlers = {
+  images?: ImageAttachment[];
   onDelta?: (delta: string) => void;
   onDone?: () => void;
   signal?: AbortSignal;
@@ -21,20 +23,53 @@ const error = (code: string): Error => new Error(code);
 
 /** Side Panel client for the authenticated background Port; it never queries Chrome tabs directly. */
 export class TabClient {
-  private readonly port: chrome.runtime.Port;
+  private port: chrome.runtime.Port;
+  private disconnected = false;
+  private disposed = false;
   private readonly pending = new Map<string, Pending>();
 
-  constructor(connect: PortFactory = () => chrome.runtime.connect({ name: 'kcode-sidepanel' })) {
-    this.port = connect();
-    this.port.onMessage.addListener((message) => this.handle(message));
-    this.port.onDisconnect.addListener(() => this.rejectAll('TAB_PORT_DISCONNECTED'));
+  constructor(private readonly connect: PortFactory = () => chrome.runtime.connect({ name: 'kcode-sidepanel' }),
+    private readonly queryOnce: ((message: unknown) => Promise<unknown>) | undefined = typeof chrome !== 'undefined' && typeof chrome.runtime?.sendMessage === 'function' ? message => chrome.runtime.sendMessage(message) : undefined) {
+    this.port = this.openPort();
   }
 
-  listConnectedTabs(): Promise<ConnectedTab[]> {
+  private openPort(): chrome.runtime.Port {
+    const port = this.connect();
+    this.disconnected = false;
+    port.onMessage.addListener(message => { if (this.port === port) this.handle(message); });
+    port.onDisconnect.addListener(() => {
+      if (this.port !== port) return;
+      this.disconnected = true;
+      this.rejectAll('TAB_PORT_DISCONNECTED');
+    });
+    return port;
+  }
+
+  private ensurePort(): void {
+    if (this.disposed) throw error('TAB_CLIENT_DISPOSED');
+    if (this.disconnected) this.port = this.openPort();
+  }
+
+  async listConnectedTabs(): Promise<ConnectedTab[]> {
+    this.ensurePort();
+    if (this.queryOnce) {
+      const requestId = createRequestId();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const response = await Promise.race([
+          this.queryOnce({ protocolVersion: 1, kind: 'SIDE_PANEL_LIST_CONNECTED_TABS', requestId }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(error('TAB_DISCOVERY_TIMEOUT')), 5000); }),
+        ]);
+        if (!isSidePanelEvent(response) || response.requestId !== requestId) throw error('TAB_DISCOVERY_INVALID');
+        return response.tabs.map(tab => ({ id: tab.tabId, title: tab.title, provider: tab.provider }));
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    }
     return this.send('SIDE_PANEL_LIST_CONNECTED_TABS', undefined, (resolve, reject) => ({ kind: 'list', resolve, reject }));
   }
 
   sendPrompt(tabId: number, prompt: string, handlers: PromptHandlers = {}): Promise<void> {
+    try { this.ensurePort(); } catch (cause) { return Promise.reject(cause); }
+    if (handlers.images?.length && !isImageAttachments(handlers.images)) return Promise.reject(error('IMAGE_ATTACHMENT_INVALID'));
     const requestId = createRequestId();
     if (handlers.signal?.aborted) return Promise.reject(error(String(handlers.signal.reason || 'USER_CANCELLED')));
     return new Promise<void>((resolve, reject) => {
@@ -50,7 +85,7 @@ export class TabClient {
       this.pending.set(requestId, { kind: 'prompt', handlers, resolve, reject, cleanup });
       handlers.signal?.addEventListener('abort', abort, { once: true });
       try {
-        this.port.postMessage({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId, targetTabId: tabId, prompt });
+        this.port.postMessage({ protocolVersion: 1, kind: 'CONTENT_SEND_PROMPT', requestId, targetTabId: tabId, prompt, ...(handlers.images?.length ? { images: handlers.images } : {}) });
       } catch {
         this.pending.delete(requestId);
         cleanup();
@@ -60,6 +95,7 @@ export class TabClient {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.rejectAll('TAB_CLIENT_DISPOSED');
     this.port.disconnect();
   }
@@ -109,7 +145,7 @@ export class TabClient {
       pending.handlers.onDone?.();
       pending.resolve();
     } else {
-      pending.reject(error(event.code));
+      pending.reject(Object.assign(error(event.code), { detail: event.message }));
     }
   }
 
